@@ -1,0 +1,222 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: AWS Glue Job to extract data from SAP HANA and write it to S3
+
+Parameters:
+  SourceBucketName:
+    Type: String
+    Description: Name of the bucket used to store the repo.
+  GlueAssetsBucketName:
+    Type: String
+    Description: Name of the bucket used to store glue runtime logs, temp files, etc
+  SaphanaGlueConnection:
+    Type: String
+    Description: Connection from glue to SAP HANA
+  RedshiftNamespaceName:
+    Type: String
+    Description: Name of the existing Redshift serverless namespace
+  RedshiftDbName:
+    Type: String
+    Description: Name of the Redshift database
+  RedshiftWorkgroupName:
+    Type: String
+    Description: Name of the Redshift workgroup
+  RedshiftBaseCapacity:
+    Type: Number
+    Description: Redshift workgroup base capacity
+    Default: 128
+  RedshiftSecurityGroupId:
+    Type: String
+    Description: Redshift serverless security group
+  RedshiftSubnetIds:
+    Type: CommaDelimitedList
+    Description: Comma-separated list of subnet IDs for Redshift
+  SchemaName:
+    Type: String
+    Description: Redshift schema to create and populate
+
+Resources:
+######################## ROLES ########################
+  GlueJobRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub 'GlueRole-${AWS::StackName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'glue.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+        - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly'
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-GluePolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 's3:PutObject'
+                  - 's3:PutObjectAcl'
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                  - 's3:*'
+                Resource: !Sub 'arn:aws:s3:::${GlueAssetsBucketName}*'
+              - Effect: 'Allow'
+                Action:
+                  - 'glue:*'
+                Resource: '*'
+  StateMachineExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties: 
+      RoleName: !Sub 'StateMachineExecutionRole-${AWS::StackName}'
+      AssumeRolePolicyDocument: 
+        Version: '2012-10-17'
+        Statement: 
+          - Effect: 'Allow'
+            Principal:
+              Service: 'states.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AWSStepFunctionsFullAccess'
+
+######################## GLUE JOBS ########################
+  DevHanaS3GoldTdpAllSalesOpenperiodsGlueJob:
+    Type: 'AWS::Glue::Job'
+    Properties:
+      Name: !Sub 'dev-hana-s3-gold-tdp-all-sales-openperiods-${AWS::StackName}'
+      Role: !GetAtt GlueJobRole.Arn
+      Command:
+        Name: 'glueetl'
+        ScriptLocation: !Sub 's3://${SourceBucketName}/TDP/glue/dev-hana-s3-gold-tdp-all-sales-openperiods.py'
+        PythonVersion: '3'
+      DefaultArguments:
+        "--enable-metrics": "true"
+        "--enable-spark-ui": "true"
+        "--spark-event-logs-path": !Sub "s3://${GlueAssetsBucketName}/sparkHistoryLogs-${AWS::StackName}/"
+        "--enable-job-insights": "false"
+        "--enable-observability-metrics": "true"
+        "--enable-glue-datacatalog": "true"
+        "--enable-continuous-cloudwatch-log": "true"
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+        "--TempDir": !Sub "s3://${GlueAssetsBucketName}/temporary-${AWS::StackName}/"
+      Connections:
+        Connections:
+          - !Ref SaphanaGlueConnection
+      MaxRetries: 0
+      Timeout: 2880
+      WorkerType: 'G.1X'
+      NumberOfWorkers: 10
+      GlueVersion: '4.0'
+      ExecutionClass: 'STANDARD'
+
+  DevS3RedshiftGoldTdpAllSalesOpenperiodsGlueJob:
+    Type: 'AWS::Glue::Job'
+    Properties:
+      Name: !Sub 'dev-s3-redshift-gold-tdp-all-sales-openperiods-${AWS::StackName}'
+      Role: !GetAtt GlueJobRole.Arn
+      Command:
+        Name: 'glueetl'
+        ScriptLocation: !Sub 's3://${SourceBucketName}/TDP/glue/dev-s3-redshift-gold-tdp-all-sales-openperiods.py'
+        PythonVersion: '3'
+      DefaultArguments:
+        "--enable-metrics": "true"
+        "--enable-spark-ui": "true"
+        "--spark-event-logs-path": !Sub "s3://${GlueAssetsBucketName}/sparkHistoryLogs-${AWS::StackName}/"
+        "--enable-job-insights": "false"
+        "--enable-observability-metrics": "true"
+        "--enable-glue-datacatalog": "true"
+        "--enable-continuous-cloudwatch-log": "true"
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+        "--TempDir": !Sub "s3://${GlueAssetsBucketName}/temporary-${AWS::StackName}/"
+      Connections:
+        Connections:
+          - !Ref SaphanaGlueConnection
+      MaxRetries: 0
+      Timeout: 2880
+      WorkerType: 'G.1X'
+      NumberOfWorkers: 10
+      GlueVersion: '4.0'
+      ExecutionClass: 'STANDARD'
+
+######################## STEP FUNCTIONS ########################
+  GoldTdpAllSalesDailyStepFunction:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub 'gold-tdp-all-sales-daily-${AWS::StackName}'
+      DefinitionUri: '../step_functions/gold-tdp-all-sales-daily.json'
+      DefinitionSubstitutions:
+        DevHanaS3GoldTdpAllSalesOpenperiodsJob: !Ref DevHanaS3GoldTdpAllSalesOpenperiodsGlueJob
+        DevS3RedshiftGoldTdpAllSalesOpenperiodsJob: !Ref DevS3RedshiftGoldTdpAllSalesOpenperiodsGlueJob
+      Events:
+        ScheduledExecution:
+          Type: Schedule
+          Properties:
+            Description: "Schedule for running the gold-tdp-all-sales-daily Step Function"
+            Schedule: "cron(0 6 * * ? *)"
+            Enabled: true
+            Name: !Sub 'gold-tdp-all-sales-daily-${AWS::StackName}'
+      Role: !GetAtt StateMachineExecutionRole.Arn
+      Type: STANDARD
+      Logging:
+        Level: "OFF"
+        IncludeExecutionData: false
+      Tracing:
+        Enabled: false
+      Tags:
+        StackName: !Ref AWS::StackName
+
+Outputs:
+  # GlueJobName:
+  #   Description: "Name of the original Glue Job"
+  #   Value: !Ref GlueJob
+  #   Export:
+  #     Name: !Sub "GlueJobName-${AWS::StackName}"
+
+  GlueJobRoleARN:
+    Description: "ARN of the IAM Role created for the Glue Jobs"
+    Value: !GetAtt GlueJobRole.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-GlueJobRoleARN"
+
+  DevHanaS3GoldTdpAllSalesOpenperiodsJobName:
+    Description: "Name of the Dev HANA to S3 Gold TDP All Sales Openperiods Glue Job"
+    Value: !Ref DevHanaS3GoldTdpAllSalesOpenperiodsGlueJob
+    Export:
+      Name: !Sub "DevHanaS3GoldTdpAllSalesOpenperiodsJobName-${AWS::StackName}"
+
+  DevS3RedshiftGoldTdpAllSalesOpenperiodsJobName:
+    Description: "Name of the Dev S3 to Redshift Gold TDP All Sales Openperiods Glue Job"
+    Value: !Ref DevS3RedshiftGoldTdpAllSalesOpenperiodsGlueJob
+    Export:
+      Name: !Sub "DevS3RedshiftGoldTdpAllSalesOpenperiodsJobName-${AWS::StackName}"
+
+  SourceBucketName:
+    Description: "Name of the Source S3 Bucket"
+    Value: !Ref SourceBucketName
+    Export:
+      Name: !Sub "SourceBucketName-${AWS::StackName}"
+
+  GlueAssetsBucketName:
+    Description: "Name of the Glue Assets S3 Bucket"
+    Value: !Ref GlueAssetsBucketName
+    Export:
+      Name: !Sub "GlueAssetsBucketName-${AWS::StackName}"
+
+  SaphanaGlueConnection:
+    Description: "Name of the SAP HANA Glue Connection"
+    Value: !Ref SaphanaGlueConnection
+    Export:
+      Name: !Sub "aphanaGlueConnection-${AWS::StackName}"
+
+  # SchemaName:
+  #   Description: "Name of the Redshift Schema"
+  #   Value: !Ref SchemaName
+  #   Export:
+  #     Name: !Sub "${AWS::StackName}-SchemaName"
