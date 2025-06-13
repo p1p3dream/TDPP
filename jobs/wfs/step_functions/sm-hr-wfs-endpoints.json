@@ -1,0 +1,150 @@
+{
+  "Comment": "State machine to get data from an API, load into S3, start a Glue Job, and archive data",
+  "StartAt": "InitializeValues",
+  "States": {
+    "InitializeValues": {
+      "Type": "Pass",
+      "ResultPath": "$.input",
+      "Parameters": {
+        "endpoint.$": "$.endpoint",
+        "use_cursor.$": "$.use_cursor",
+        "sql_command.$": "$.sql_command",
+        "tag": "${Tag}"
+      },
+      "Next": "InvokeGlueJobForAPI"
+    },
+    "InvokeGlueJobForAPI": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${ApiEndpointsGlueJobName}",
+        "Arguments": {
+          "--endpoint.$": "$.input.endpoint",
+          "--use_cursor.$": "$.input.use_cursor",
+          "--taskToken.$": "$$.Task.Token"
+        }
+      },
+      "ResultPath": "$.input.result",
+      "Next": "CheckApiResult",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "SendErrorNotification"
+        }
+      ]
+    },
+    "CheckApiResult": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Or": [
+            {
+              "Variable": "$.input.result",
+              "StringEquals": "No new data"
+            },
+            {
+              "Variable": "$.input.result",
+              "StringEquals": "No data"
+            }
+          ],
+          "Next": "NoNewDataOrNoData"
+        }
+      ],
+      "Default": "InvokeSQLCommand"
+    },
+    "InvokeSQLCommand": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${SapHanaSqlCommandsLambdaArn}",
+        "Payload": {
+          "sql_command.$": "$.input.sql_command",
+          "endpoint.$": "$.input.endpoint"
+        }
+      },
+      "ResultPath": "$.sqlCommandResult",
+      "Next": "StartGlueJobForProcessing",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "SendErrorNotification"
+        }
+      ]
+    },
+    "StartGlueJobForProcessing": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName.$": "States.Format('glu-hr-wfs-{}-{}', $.input.endpoint, $.input.tag)"
+      },
+      "ResultPath": "$.glueJobResult",
+      "Next": "InvokeArchiveLambda",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "SendErrorNotification"
+        }
+      ]
+    },
+    "NoNewDataOrNoData": {
+      "Type": "Pass",
+      "End": true
+    },
+    "InvokeArchiveLambda": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${S3CleanupLambdaArn}",
+        "Payload": {
+          "folder_name.$": "$.input.endpoint"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "End": true,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "SendErrorNotification"
+        }
+      ]
+    },
+    "SendErrorNotification": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${EmailAlertTopicArn}",
+        "Message.$": "States.Format('An error occurred in the state machine {} in state {}. Error details: {}', $$.StateMachine.Name, $$.State.Name, $.error)"
+      },
+      "Next": "FailExecution"
+    },
+    "FailExecution": {
+      "Type": "Fail",
+      "Error": "WorkflowFailed",
+      "CausePath": "States.Format('Execution failed with error: {}', $.error.Cause)"
+    }
+  }
+}

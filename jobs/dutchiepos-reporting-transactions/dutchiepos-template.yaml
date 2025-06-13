@@ -1,0 +1,85 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  BronzeBucket:
+    Type: String
+    Description: Name of the bucket returns are landing in
+  LambdaRoleArn:
+    Type: String
+    Description: ARN of the IAM Role for the  Lambda Functions
+  Tag:
+    Type: String
+    Description: Tag to append to resource names
+  Environment:
+    Type: String
+    Description: Deployment environment (dev/prod)
+    AllowedValues: 
+      - dev
+      - prod
+
+
+
+############### LAMBDA FUNCTIONS ###############
+Resources:
+  DutchiePOSRawLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-ingestion-raw-dutchiepos-reporting-${Tag}'
+      Handler: lam-ingestion-raw-dutchiepos-reporting.lambda_handler
+      CodeUri: ./lambda_functions/lam-ingestion-raw-dutchiepos-reporting/
+      Runtime: python3.9
+      Role: !Ref LambdaRoleArn
+      Timeout: 300
+      MemorySize: 2048
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+
+  DutchiePOSStgLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-ingestion-stg-dutchiepos-reporting-transactions-${Tag}'
+      Handler: lam-ingestion-stg-dutchiepos-reporting-transactions.lambda_handler
+      CodeUri: ./lambda_functions/lam-ingestion-stg-dutchiepos-reporting-transactions/
+      Runtime: python3.9
+      Role: !Ref LambdaRoleArn
+      Timeout: 300
+      MemorySize: 2048
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+
+  DutchiePOSBronzeLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-ingestion-bronze-dutchiepos-reporting-${Tag}'
+      Handler: lam-ingestion-bronze-dutchiepos-reporting.lambda_handler
+      CodeUri: ./lambda_functions/lam-ingestion-bronze-dutchiepos-reporting/
+      Runtime: python3.9
+      Role: !Ref LambdaRoleArn
+      Timeout: 300
+      MemorySize: 2048
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+
+
+Outputs:
+  DutchiePOSRawLambda:
+    Description: "Repsly Lambda Function ARN"
+    Value: !Ref DutchiePOSRawLambda
+  
+  DutchiePOSStgLambda:
+    Description: "STG Ingestion Lambda Function"
+    Value: !Ref DutchiePOSStgLambda
+  
+  DutchiePOSBronzeLambda:
+    Description: "Raw Ingestion Lambda Function"
+    Value: !Ref DutchiePOSBronzeLambda

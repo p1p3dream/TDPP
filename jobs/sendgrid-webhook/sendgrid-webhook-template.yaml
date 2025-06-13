@@ -1,0 +1,77 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: SendGrid Webhook to Snowflake
+Parameters:
+  Tag:
+    Type: String
+    Description: Tag definition for stack
+  SnowflakeLayer:
+    Type: String
+    Description: Snowflake lambda layer
+  ComprehensiveRoleArn:
+    Type: String
+    Description: ARN of the IAM Role for the Lambda Functions
+  DatUtilitiesLayer:
+    Type: String
+    Description: ARN of the dat_utilities Lambda layer
+
+Resources:
+  SendGridWebhookApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "SendGridWebhookApi-${Tag}"
+      Description: API Gateway for SendGrid Webhook POST API
+      StageName: dev
+      Cors:
+        AllowMethods: "'POST'"
+        AllowHeaders: "'Content-Type'"
+        AllowOrigin: "'*'"
+      Tags:
+        Contact: data.engineering@trulieve.com
+        Environment: Dev
+        Project: TDP
+
+  SendGridPublicKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "sendgrid-public-key-${Tag}"
+      Description: "The public key used for verifying SendGrid webhook signatures"
+      SecretString: !Sub |
+        -----BEGIN PUBLIC KEY-----
+        MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBC/hi7sd/IT2+zoKHf0
+        rFTb3cUUEWxFVrYchXkckC+AIp0nkYUDFKNpLYPegkFnNoHupBrY7K2
+        eJlu0Os1Mbpg==
+        -----END PUBLIC KEY-----
+
+  SendGridWebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "sendgrid-webhook-handler-${Tag}"
+      Description: Function to process realtime events from SendGrid Webhooks
+      Runtime: python3.9
+      Handler: sendgrid-webhook-post-lambda.lambda_handler
+      CodeUri: ./lambda_functions/  # path to lambda_handler.py
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 300
+      MemorySize: 1024
+      Tags:
+        Contact: data.engineering@trulieve.com
+        Environment: Dev
+        Project: TDP
+      Layers:
+        - !Ref SnowflakeLayer
+        - !Ref DatUtilitiesLayer
+      Policies:
+        - !Ref ComprehensiveRoleArn
+      Events:
+        WebhookEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SendGridWebhookApi
+            Path: /webhook
+            Method: post
+
+Outputs:
+  WebhookInvokeURL:
+    Description: "POST URL for SendGrid webhook"
+    Value: !Sub "https://${SendGridWebhookApi}.execute-api.${AWS::Region}.amazonaws.com/prod/webhook"

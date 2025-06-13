@@ -1,0 +1,705 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  SourceBucketName:
+    Type: String
+    Description: Name of the bucket used to store the repo.
+  GlueAssetsBucketName:
+    Type: String
+    Description: Name of the bucket used to store glue runtime logs, temp files, etc
+  SaphanaGlueConnection:
+    Type: String
+    Description: Connection from glue to SAP HANA
+  GlueJobRoleArn:
+    Type: String
+    Description: ARN of the IAM Role for Glue Jobs
+  Tag:
+    Type: String
+    Description: Tag to append to resource names
+  StateMachineExecutionRoleArn:
+    Type: String
+    Description: ARN of the IAM Role for Step Function execution
+  Environment:
+    Type: String
+    Description: Deployment environment (dev/prod)
+    AllowedValues: 
+      - dev
+      - prod
+  ComprehensiveRoleArn:
+    Type: String
+    Description: ARN of the IAM Role for the Lambda Functions
+  SapHanaLayer:
+    Type: String
+    Description: arn of snowflake layer
+
+Resources:
+  
+  ############# LAMBDA FUNCTIONS ##################
+  HrWfsApiEndpointsLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-hr-wfs-api-endpoints-${Tag}'
+      Handler: lam-hr-wfs-api-endpoints.lambda_handler
+      CodeUri: ./lambda_functions/lam-hr-wfs-api-endpoints/
+      Runtime: python3.9
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 900
+      MemorySize: 512
+      Architectures:
+        - x86_64
+      Description: "No description"
+      Tracing: 'PassThrough'
+      Layers:
+        - arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python39:21
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+      Tags:
+        Application: HRWorkflow
+        Environment: !Ref Environment
+
+  SapHanaSqlCommandsLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-sap-hana-sql-commands-${Tag}'
+      Handler: lam-sap-hana-sql-commands.lambda_handler
+      CodeUri: ./lambda_functions/lam-sap-hana-sql-commands/
+      Runtime: python3.9
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 900
+      MemorySize: 512
+      Architectures:
+        - x86_64
+      Description: "Lambda to query HANA and stage results"
+      Layers:
+        - !Ref SapHanaLayer
+      Tags:
+        Application: HRWorkflow
+        Environment: !Ref Environment
+
+  HrWfsApiS3CleanupLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'hr-wfs-api-s3cleanup-${Tag}'
+      Handler: hr-wfs-api-s3cleanup.lambda_handler
+      CodeUri: ./lambda_functions/hr-wfs-api-s3cleanup/
+      Runtime: python3.9
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 90
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Description: "No description"
+      Tracing: 'PassThrough'
+      Layers:
+        - arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python39:21
+      Tags:
+        Application: WfsApiCleanup
+        Environment: !Ref Environment
+
+  ############ GLUE JOBS ####################
+  WFSBankGlueJob:
+   Type: 'AWS::Glue::Job'
+   Properties:
+     Name: !Sub 'glu-hr-wfs-bank-${Tag}'
+     Role: !Ref ComprehensiveRoleArn
+     ExecutionProperty:
+       MaxConcurrentRuns: 1
+     Command:
+       Name: glueetl
+       ScriptLocation: ./glue/glu-hr-wfs-bank.py
+       PythonVersion: '3'
+     DefaultArguments:
+       --additional-python-modules: snowflake-connector-python
+       --sql_command: ''
+       --endpoint: 'bank'
+       --enable-metrics: 'true'
+       --enable-spark-ui: 'true'
+       --spark-event-logs-path: !Sub 's3://${GlueAssetsBucketName}/sparkHistoryLogs-${Tag}/'
+       --enable-job-insights: 'true'
+       --enable-observability-metrics: 'true'
+       --enable-glue-datacatalog: 'true'
+       --enable-continuous-cloudwatch-log: 'true'
+       --job-bookmark-option: job-bookmark-disable
+       --job-language: python
+       --TempDir: !Sub 's3://${GlueAssetsBucketName}/temporary-${Tag}/'
+     Connections:
+       Connections:
+         - !Ref SaphanaGlueConnection
+     MaxRetries: 0
+     Timeout: 480
+     WorkerType: G.1X
+     NumberOfWorkers: 10
+     GlueVersion: '5.0'
+     ExecutionClass: STANDARD
+
+  WFSBankEventsGlueJob:
+   Type: 'AWS::Glue::Job'
+   Properties:
+     Name: !Sub 'glu-hr-wfs-bank-events-${Tag}'
+     Role: !Ref ComprehensiveRoleArn
+     ExecutionProperty:
+       MaxConcurrentRuns: 1
+     Command:
+       Name: glueetl
+       ScriptLocation: ./glue/glu-hr-wfs-bank-events.py
+       PythonVersion: '3'
+     DefaultArguments:
+       --additional-python-modules: snowflake-connector-python
+       --sql_command: ''
+       --endpoint: 'bank'
+       --enable-metrics: 'true'
+       --enable-spark-ui: 'true'
+       --spark-event-logs-path: !Sub 's3://${GlueAssetsBucketName}/sparkHistoryLogs-${Tag}/'
+       --enable-job-insights: 'true'
+       --enable-observability-metrics: 'true'
+       --enable-glue-datacatalog: 'true'
+       --enable-continuous-cloudwatch-log: 'true'
+       --job-bookmark-option: job-bookmark-disable
+       --job-language: python
+       --TempDir: !Sub 's3://${GlueAssetsBucketName}/temporary-${Tag}/'
+     Connections:
+       Connections:
+         - !Ref SaphanaGlueConnection
+     MaxRetries: 0
+     Timeout: 480
+     WorkerType: G.1X
+     NumberOfWorkers: 10
+     GlueVersion: '5.0'
+     ExecutionClass: STANDARD
+
+  WFSCalculatedTimeGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 'glu-hr-wfs-calculated-time-${Tag}'
+      Role: !Ref ComprehensiveRoleArn
+      Description: ''
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Command:
+        Name: glueetl
+        PythonVersion: '3'
+        ScriptLocation: ./glue/glu-hr-wfs-calculated-time.py
+      DefaultArguments:
+        --enable-metrics: 'true'
+        --enable-spark-ui: 'true'
+        --spark-event-logs-path: !Sub 's3://${GlueAssetsBucketName}/sparkHistoryLogs-${Tag}/'
+        --enable-job-insights: 'true'
+        --enable-observability-metrics: 'true'
+        --enable-glue-datacatalog: 'true'
+        --enable-continuous-cloudwatch-log: 'true'
+        --job-bookmark-option: job-bookmark-disable
+        --job-language: python
+        --TempDir: !Sub 's3://${GlueAssetsBucketName}/temporary-${Tag}/'
+      MaxRetries: 0
+      Timeout: 480
+      WorkerType: G.1X
+      NumberOfWorkers: 10
+      GlueVersion: '5.0'
+      ExecutionClass: STANDARD
+      Connections:
+        Connections:
+          - !Ref SaphanaGlueConnection
+
+  # WFSEmployeeGlueJob:
+  #   Type: AWS::Glue::Job
+  #   Properties:
+  #     Name: !Sub 'glu-hr-wfs-employee-${Tag}'
+  #     Role: !Ref !]] ComprehensiveRoleArn
+  #     Description: ''
+  #     ExecutionProperty:
+  #       MaxConcurrentRuns: 1
+  #     Command:
+  #       Name: glueetl
+  #       PythonVersion: '3'
+  #       ScriptLocation: ./glue/glu-hr-wfs-employee.py
+  #     DefaultArguments:
+  #       --enable-metrics: 'true'
+  #       --enable-spark-ui: 'true'
+  #       --spark-event-logs-path: !Sub 's3://${GlueAssetsBucketName}/sparkHistoryLogs-${Tag}/'
+  #       --enable-job-insights: 'true'
+  #       --enable-observability-metrics: 'true'
+  #       --enable-glue-datacatalog: 'true'
+  #       --enable-continuous-cloudwatch-log: 'true'
+  #       --job-bookmark-option: job-bookmark-disable
+  #       --job-language: python
+  #       --TempDir: !Sub 's3://${GlueAssetsBucketName}/temporary-${Tag}/'
+  #     MaxRetries: 0
+  #     Timeout: 480
+  #     WorkerType: G.1X
+  #     NumberOfWorkers: 10
+  #     GlueVersion: '5.0'
+  #     ExecutionClass: STANDARD
+  #     Connections:
+  #       Connections:
+  #         - !Ref SaphanaGlueConnection
+
+  WFSPayGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 'glu-hr-wfs-pay-${Tag}'
+      Role: !Ref ComprehensiveRoleArn
+      Description: ''
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Command:
+        Name: glueetl
+        PythonVersion: '3'
+        ScriptLocation: ./glue/glu-hr-wfs-pay.py
+      DefaultArguments:
+        --enable-metrics: 'true'
+        --enable-spark-ui: 'true'
+        --spark-event-logs-path: !Sub 's3://${GlueAssetsBucketName}/sparkHistoryLogs-${Tag}/'
+        --enable-job-insights: 'true'
+        --enable-observability-metrics: 'true'
+        --enable-glue-datacatalog: 'true'
+        --enable-continuous-cloudwatch-log: 'true'
+        --job-bookmark-option: job-bookmark-disable
+        --job-language: python
+        --TempDir: !Sub 's3://${GlueAssetsBucketName}/temporary-${Tag}/'
+      MaxRetries: 0
+      Timeout: 480
+      WorkerType: G.1X
+      NumberOfWorkers: 10
+      GlueVersion: '5.0'
+      ExecutionClass: STANDARD
+      Connections:
+        Connections:
+          - !Ref SaphanaGlueConnection
+
+  WFSShiftGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 'glu-hr-wfs-shift-${Tag}'
+      Role: !Ref ComprehensiveRoleArn
+      Description: ''
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Command:
+        Name: glueetl
+        PythonVersion: '3'
+        ScriptLocation: ./glue/glu-hr-wfs-shift.py
+      DefaultArguments:
+        --enable-metrics: 'true'
+        --enable-spark-ui: 'true'
+        --extra-py-files: 's3://aws-glue-studio-transforms-510798373988-prod-us-east-1/gs_common.py,s3://aws-glue-studio-transforms-510798373988-prod-us-east-1/gs_flatten.py'
+        --spark-event-logs-path: !Sub 's3://${GlueAssetsBucketName}/sparkHistoryLogs-${Tag}/'
+        --enable-job-insights: 'true'
+        --enable-observability-metrics: 'true'
+        --enable-glue-datacatalog: 'true'
+        --enable-continuous-cloudwatch-log: 'true'
+        --job-bookmark-option: job-bookmark-disable
+        --job-language: python
+        --TempDir: !Sub 's3://${GlueAssetsBucketName}/temporary-${Tag}/'
+      MaxRetries: 0
+      Timeout: 480
+      WorkerType: G.1X
+      NumberOfWorkers: 10
+      GlueVersion: '5.0'
+      ExecutionClass: STANDARD
+      Connections:
+        Connections:
+          - !Ref SaphanaGlueConnection
+
+  WFSTimeExceptionsGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 'glu-hr-wfs-time-exceptions-${Tag}'
+      Role: !Ref ComprehensiveRoleArn
+      Description: ''
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Command:
+        Name: glueetl
+        PythonVersion: '3'
+        ScriptLocation: ./glue/glu-hr-wfs-time-exceptions.py
+      DefaultArguments:
+        --enable-metrics: 'true'
+        --enable-spark-ui: 'true'
+        --spark-event-logs-path: !Sub 's3://${GlueAssetsBucketName}/sparkHistoryLogs-${Tag}/'
+        --enable-job-insights: 'true'
+        --enable-observability-metrics: 'true'
+        --enable-glue-datacatalog: 'true'
+        --enable-continuous-cloudwatch-log: 'true'
+        --job-bookmark-option: job-bookmark-disable
+        --job-language: python
+        --TempDir: !Sub 's3://${GlueAssetsBucketName}/temporary-${Tag}/'
+      MaxRetries: 0
+      Timeout: 480
+      WorkerType: G.1X
+      NumberOfWorkers: 10
+      GlueVersion: '5.0'
+      ExecutionClass: STANDARD
+      Connections:
+        Connections:
+          - !Ref SaphanaGlueConnection
+
+  WFSTimeOffGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 'glu-hr-wfs-time-off-${Tag}'
+      Role: !Ref ComprehensiveRoleArn
+      Description: ''
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Command:
+        Name: glueetl
+        PythonVersion: '3'
+        ScriptLocation: ./glue/glu-hr-wfs-time-off.py
+      DefaultArguments:
+        --enable-metrics: 'true'
+        --enable-spark-ui: 'true'
+        --spark-event-logs-path: !Sub 's3://${GlueAssetsBucketName}/sparkHistoryLogs-${Tag}/'
+        --enable-job-insights: 'true'
+        --enable-observability-metrics: 'true'
+        --enable-glue-datacatalog: 'true'
+        --enable-continuous-cloudwatch-log: 'true'
+        --job-bookmark-option: job-bookmark-disable
+        --job-language: python
+        --TempDir: !Sub 's3://${GlueAssetsBucketName}/temporary-${Tag}/'
+      MaxRetries: 0
+      Timeout: 480
+      WorkerType: G.1X
+      NumberOfWorkers: 10
+      GlueVersion: '5.0'
+      ExecutionClass: STANDARD
+      Connections:
+        Connections:
+          - !Ref SaphanaGlueConnection
+
+  WFSApiEndpointsGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 'glu-hr-wfs-api-endpoints-${Tag}'
+      Role: !Ref ComprehensiveRoleArn
+      Description: 'Job for fetching data from WFS API endpoints'
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Command:
+        Name: pythonshell
+        PythonVersion: '3.9'
+        ScriptLocation: ./glue/glu-hr-wfs-api-endpoints.py
+      DefaultArguments:
+        --enable-metrics: 'true'
+        --enable-continuous-cloudwatch-log: 'true'
+        --job-bookmark-option: job-bookmark-disable
+        --job-language: python
+      MaxRetries: 0
+      Timeout: 900
+      GlueVersion: '4.0'
+      ExecutionClass: STANDARD
+
+  ############ SNS TOPIC ##################
+  WFSEmailAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'sns-hr-wfs-email-alert-${Tag}'
+      DisplayName: !Sub 'WFS Email Alerts ${Tag}'
+
+  WFSEmailAlertTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref WFSEmailAlertTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: "__default_statement_ID"
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+              - SNS:Publish
+              - SNS:RemovePermission
+              - SNS:SetTopicAttributes
+              - SNS:DeleteTopic
+              - SNS:ListSubscriptionsByTopic
+              - SNS:GetTopicAttributes
+              - SNS:AddPermission
+              - SNS:Subscribe
+            Resource: !Ref WFSEmailAlertTopic
+            Condition:
+              StringEquals:
+                AWS:SourceOwner: "076579646618"
+          - Sid: "__console_pub_0"
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: SNS:Publish
+            Resource: !Ref WFSEmailAlertTopic
+          - Sid: "__console_sub_0"
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: SNS:Subscribe
+            Resource: !Ref WFSEmailAlertTopic
+
+  ############ STATE MACHINE ##################kjZ 
+  HRWFSEndPointsStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub 'sm-hr-wfs-endpoints-${Tag}'
+      DefinitionUri: ./step_functions/sm-hr-wfs-endpoints.json
+      Role: !Ref ComprehensiveRoleArn
+      DefinitionSubstitutions:
+        ApiEndpointsGlueJobName: !Ref WFSApiEndpointsGlueJob
+        SapHanaSqlCommandsLambdaArn: !GetAtt SapHanaSqlCommandsLambda.Arn
+        S3CleanupLambdaArn: !GetAtt HrWfsApiS3CleanupLambda.Arn
+        EmailAlertTopicArn: !Ref WFSEmailAlertTopic
+        Tag: !Ref Tag
+      Type: STANDARD
+      Tracing:
+        Enabled: true
+      Tags:
+        Application: HRWorkflow
+        Environment: !Ref Environment
+
+################# EVENTBRIDGE SCHEDULE GROUP ################
+  HRWFSScheduleGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Properties:
+      Name: !Sub 'sg-hr-wfs-${Tag}'
+
+  ################## EVENTBRIDGE SCHEDULES *##############
+  HRWFSBankSchedule:
+    Type: AWS::Scheduler::Schedule
+    DependsOn: HRWFSScheduleGroup 
+    Properties:
+      Name: !Sub 'evb-hr-wfs-bank-${Tag}'
+      GroupName: !Ref HRWFSScheduleGroup
+      FlexibleTimeWindow: 
+        Mode: FLEXIBLE
+        MaximumWindowInMinutes: 15
+      ScheduleExpression: "rate(1 days)"
+      ScheduleExpressionTimezone: America/New_York
+      Target:
+        Arn: !GetAtt HRWFSEndPointsStateMachine.Arn
+        RoleArn: !Ref ComprehensiveRoleArn
+        Input: |
+            {
+              "endpoint": "bank",
+              "use_cursor": "false" ,
+              "sql_command": "DELETE FROM sc_hr.wfs_bank WHERE TO_DATE(load_timestamp) <> CURRENT_DATE;"
+            }
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 82800
+          MaximumRetryAttempts: 1
+
+  HRWFSBankEventsSchedule:
+    Type: AWS::Scheduler::Schedule
+    DependsOn: HRWFSScheduleGroup 
+    Properties:
+      Name: !Sub 'evb-hr-wfs-bank-events-${Tag}'
+      GroupName: !Ref HRWFSScheduleGroup
+      FlexibleTimeWindow: 
+        Mode: FLEXIBLE
+        MaximumWindowInMinutes: 15
+      ScheduleExpression: "rate(1 days)"
+      ScheduleExpressionTimezone: America/New_York
+      Target:
+        Arn: !GetAtt HRWFSEndPointsStateMachine.Arn
+        RoleArn: !Ref ComprehensiveRoleArn
+        Input: |
+            {
+              "endpoint": "bank-events",
+              "use_cursor": "false" ,
+              "sql_command": "DELETE FROM sc_hr.wfs_bank_events WHERE TO_DATE(load_timestamp) <> CURRENT_DATE;"
+            }
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 82800
+          MaximumRetryAttempts: 1
+            
+  HRWFSCalculatedTimeSchedule:
+    Type: AWS::Scheduler::Schedule
+    DependsOn: HRWFSScheduleGroup 
+    Properties:
+      Name: !Sub 'evb-hr-wfs-calculated-time-${Tag}'
+      GroupName: !Ref HRWFSScheduleGroup
+      FlexibleTimeWindow:
+        Mode: FLEXIBLE
+        MaximumWindowInMinutes: 15
+      ScheduleExpression: "rate(1 days)"
+      ScheduleExpressionTimezone: America/New_York
+      Target:
+        Arn: !GetAtt HRWFSEndPointsStateMachine.Arn
+        RoleArn: !Ref ComprehensiveRoleArn
+        Input: |
+          {
+            "endpoint": "calculated-time",
+            "use_cursor": "false" ,
+            "sql_command": "DELETE FROM sc_hr.wfs_calculated_time WHERE TO_DATE(load_timestamp) <> CURRENT_DATE;"
+          }
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 1800
+          MaximumRetryAttempts: 1
+
+  # HRWFSEmployeeSchedule:
+  #   Type: AWS::Scheduler::Schedule
+  #   DependsOn: HRWFSScheduleGroup 
+  #   Properties:
+  #     Name: !Sub 'evb-hr-wfs-employee-${Tag}'
+  #     GroupName: !Ref HRWFSScheduleGroup
+  #     FlexibleTimeWindow:
+  #       Mode: FLEXIBLE
+  #       MaximumWindowInMinutes: 15
+  #     ScheduleExpression: "rate(1 days)"
+  #     ScheduleExpressionTimezone: America/New_York
+  #     Target:
+  #       Arn: !GetAtt HRWFSEndPointsStateMachine.Arn
+  #       RoleArn: !Ref ComprehensiveRoleArn
+  #       Input: |
+  #         {
+  #           "endpoint": "employee",
+  #           "use_cursor": "false" ,
+  #           "sql_command": "DELETE FROM sc_hr.wfs_employee WHERE TO_DATE(load_timestamp) <> CURRENT_DATE;"
+  #         }
+  #       RetryPolicy:
+  #         MaximumEventAgeInSeconds: 3600
+  #         MaximumRetryAttempts: 1
+
+  HRWFSPaySchedule:
+    Type: AWS::Scheduler::Schedule
+    DependsOn: HRWFSScheduleGroup 
+    Properties:
+      Name: !Sub 'evb-hr-wfs-pay-${Tag}'
+      GroupName: !Ref HRWFSScheduleGroup
+      FlexibleTimeWindow:
+        Mode: FLEXIBLE
+        MaximumWindowInMinutes: 15
+      ScheduleExpression: "rate(14 days)"
+      ScheduleExpressionTimezone: America/New_York
+      Target:
+        Arn: !GetAtt HRWFSEndPointsStateMachine.Arn
+        RoleArn: !Ref ComprehensiveRoleArn
+        Input: |
+          {
+            "endpoint": "pay",
+            "use_cursor": "false" ,
+            "sql_command": "DELETE FROM sc_hr.wfs_pay WHERE TO_DATE(load_timestamp) <> CURRENT_DATE;"
+          }
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 3600
+          MaximumRetryAttempts: 1
+
+  HRWFSShiftSchedule:
+    Type: AWS::Scheduler::Schedule
+    DependsOn: HRWFSScheduleGroup 
+    Properties:
+      Name: !Sub 'evb-hr-wfs-shift-${Tag}'
+      GroupName: !Ref HRWFSScheduleGroup
+      FlexibleTimeWindow:
+        Mode: FLEXIBLE
+        MaximumWindowInMinutes: 15
+      ScheduleExpression: "rate(1 days)"
+      ScheduleExpressionTimezone: America/New_York
+      Target:
+        Arn: !GetAtt HRWFSEndPointsStateMachine.Arn
+        RoleArn: !Ref ComprehensiveRoleArn
+        Input: |
+          {
+            "endpoint": "shift",
+            "use_cursor": "false" ,
+            "sql_command": "DELETE FROM sc_hr.wfs_shift WHERE TO_DATE(load_timestamp) <> CURRENT_DATE;"
+          }
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 3600
+          MaximumRetryAttempts: 1
+
+  HRWFSTimeExceptionsSchedule:
+    Type: AWS::Scheduler::Schedule
+    DependsOn: HRWFSScheduleGroup 
+    Properties:
+      Name: !Sub 'evb-hr-wfs-time-exceptions-${Tag}'
+      GroupName: !Ref HRWFSScheduleGroup
+      FlexibleTimeWindow:
+        Mode: FLEXIBLE
+        MaximumWindowInMinutes: 15
+      ScheduleExpression: "rate(1 days)"
+      ScheduleExpressionTimezone: America/New_York
+      Target:
+        Arn: !GetAtt HRWFSEndPointsStateMachine.Arn
+        RoleArn: !Ref ComprehensiveRoleArn
+        Input: |
+          {
+            "endpoint": "time-exceptions",
+            "use_cursor": "false" ,
+            "sql_command": "DELETE FROM sc_hr.wfs_time_exceptions WHERE TO_DATE(load_timestamp) <> CURRENT_DATE;"
+          }
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 3600
+          MaximumRetryAttempts: 1
+
+  HRWFSTimeOffSchedule:
+    Type: AWS::Scheduler::Schedule
+    DependsOn: HRWFSScheduleGroup 
+    Properties:
+      Name: !Sub 'evb-hr-wfs-time-off-${Tag}'
+      GroupName: !Ref HRWFSScheduleGroup
+      FlexibleTimeWindow:
+        Mode: FLEXIBLE
+        MaximumWindowInMinutes: 15
+      ScheduleExpression: "rate(1 days)"
+      ScheduleExpressionTimezone: America/New_York
+      Target:
+        Arn: !GetAtt HRWFSEndPointsStateMachine.Arn
+        RoleArn: !Ref ComprehensiveRoleArn
+        Input: |
+          {
+            "endpoint": "time-off",
+            "use_cursor": "false" ,
+            "sql_command": "DELETE FROM sc_hr.wfs_time_off WHERE TO_DATE(load_timestamp) <> CURRENT_DATE;"
+          }
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 3600
+          MaximumRetryAttempts: 1
+
+
+Outputs:
+  StateMachineArn:
+    Description: ARN of the HR WFS Endpoints State Machine
+    Value: !GetAtt HRWFSEndPointsStateMachine.Arn
+
+  SNSTopicArn:
+    Description: ARN of the WFS Email Alert SNS Topic
+    Value: !Ref WFSEmailAlertTopic
+
+  ApiEndpointsLambdaArn:
+    Description: ARN of the WFS API Endpoints Lambda
+    Value: !GetAtt HrWfsApiEndpointsLambda.Arn
+
+  SapHanaSqlCommandsLambdaArn:
+    Description: ARN of the Snowflake SQL Commands Lambda
+    Value: !GetAtt SapHanaSqlCommandsLambda.Arn
+
+  S3CleanupLambdaArn:
+    Description: ARN of the WFS API S3 Cleanup Lambda
+    Value: !GetAtt HrWfsApiS3CleanupLambda.Arn
+
+  BankGlueJobName:
+    Description: Name of the WFS Bank Glue Job
+    Value: !Ref WFSBankGlueJob
+
+  CalculatedTimeGlueJobName:
+    Description: Name of the WFS Calculated Time Glue Job
+    Value: !Ref WFSCalculatedTimeGlueJob
+
+  PayGlueJobName:
+    Description: Name of the WFS Pay Glue Job
+    Value: !Ref WFSPayGlueJob
+
+  ShiftGlueJobName:
+    Description: Name of the WFS Shift Glue Job
+    Value: !Ref WFSShiftGlueJob
+
+  TimeExceptionsGlueJobName:
+    Description: Name of the WFS Time Exceptions Glue Job
+    Value: !Ref WFSTimeExceptionsGlueJob
+
+  TimeOffGlueJobName:
+    Description: Name of the WFS Time Off Glue Job
+    Value: !Ref WFSTimeOffGlueJob
+
+  ApiEndpointsGlueJobName:
+    Description: Name of the WFS API Endpoints Glue Job
+    Value: !Ref WFSApiEndpointsGlueJob

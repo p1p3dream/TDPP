@@ -1,0 +1,151 @@
+{
+  "Comment": "A description of my state machine with parallel Glue job execution",
+  "StartAt": "Lambda Invoke",
+  "States": {
+    "Lambda Invoke": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "FunctionName": "${S3ToS3FinanceLambda}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "Query"
+    },
+    "Query": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:dynamodb:scan",
+      "Parameters": {
+        "TableName": "tdp-control-finance"
+      },
+      "ResultPath": "$.scanResults",
+      "Next": "Process Items"
+    },
+    "Process Items": {
+      "Type": "Map",
+      "ItemsPath": "$.scanResults.Items",
+      "MaxConcurrency": 5,
+      "Iterator": {
+        "StartAt": "Check Active Flag",
+        "States": {
+          "Check Active Flag": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Variable": "$.flag_active.S",
+                "StringEquals": "true",
+                "Next": "Glue StartJobRun"
+              }
+            ],
+            "Default": "Item Processing Complete"
+          },
+          "Glue StartJobRun": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::glue:startJobRun.sync",
+            "Parameters": {
+              "JobName": "tdp-glue-hana-to-s3-finance-${Tag}",
+              "Arguments": {
+                "--start_date.$": "$.start_date.S",
+                "--end_date.$": "$.end_date.S",
+                "--state.$": "$.state.S",
+                "--report_name.$": "$.report_name.S"
+              }
+            },
+            "ResultPath": "$.glueResult",
+            "Next": "Calculate Dates",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Glue.ConcurrentRunsExceededException"
+                ],
+                "IntervalSeconds": 10,
+                "MaxAttempts": 30,
+                "BackoffRate": 1.5
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "SNS Publish"
+              }
+            ]
+          },
+          "SNS Publish": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::sns:publish",
+            "Parameters": {
+              "TopicArn": "${FinanceTopicArn}",
+              "Message": "An error occurred in the state machine. Error: $.Error, Cause: $.Cause"
+            },
+            "Next": "Item Processing Complete"
+          },
+          "Calculate Dates": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${CalculateDateFinanceLambda}"
+            },
+            "ResultPath": "$.dates",
+            "Next": "Update Table"
+          },
+          "Update Table": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::dynamodb:updateItem",
+            "Parameters": {
+              "TableName": "tdp-control-finance",
+              "Key": {
+                "glue_id": {
+                  "S.$": "$.glue_id.S"
+                }
+              },
+              "UpdateExpression": "SET start_date = :start_date, end_date = :end_date, last_run = :last_run",
+              "ExpressionAttributeValues": {
+                ":start_date": {
+                  "S.$": "$.dates.Payload.body.start_date"
+                },
+                ":end_date": {
+                  "S.$": "$.dates.Payload.body.end_date"
+                },
+                ":last_run": {
+                  "S.$": "$$.State.EnteredTime"
+                }
+              }
+            },
+            "Next": "Item Processing Complete",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "SNS Publish"
+              }
+            ]
+          },
+          "Item Processing Complete": {
+            "Type": "Pass",
+            "End": true
+          }
+        }
+      },
+      "Next": "Finish"
+    },
+    "Finish": {
+      "Type": "Pass",
+      "End": true
+    }
+  }
+}

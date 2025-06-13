@@ -1,0 +1,24 @@
+{
+  "Comment": "Run gold-tdp-all-sales process",
+  "StartAt": "gold-tdp-all-sales-ingest",
+  "States": {
+    "gold-tdp-all-sales-ingest": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${DevHanaS3GoldTdpAllSalesOpenperiodsJob}"
+      },
+      "Next": "gold-tdp-all-sales-redshift",
+      "TimeoutSeconds": 3600
+    },
+    "gold-tdp-all-sales-redshift": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${DevS3RedshiftGoldTdpAllSalesOpenperiodsJob}"
+      },
+      "End": true
+    }
+  },
+  "TimeoutSeconds": 6000
+}

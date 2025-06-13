@@ -1,0 +1,170 @@
+name: Manual Nested Deploy to AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to append to the stack name and objects'
+        required: true
+        default: 'v1'
+      environment:
+        description: 'Deployment environment (dev or prod)'
+        required: true
+        default: 'dev'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Set up AWS SAM
+        uses: aws-actions/setup-sam@v2
+        with:
+          version: 1.38.1
+
+      - name: Set environment variables
+        run: |
+          if [[ "${{ github.event.inputs.environment }}" == "prod" ]]; then
+            echo "Deploying to production"
+            cat env/env.prod >> $GITHUB_ENV
+            echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+          else
+            echo "Deploying to development"
+            cat env/env.dev >> $GITHUB_ENV
+            echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+          fi
+      - name: Debug Environment Variables
+        run: |
+          echo "Environment: ${{ env.ENVIRONMENT_NAME }}"
+          echo "AWS Access Key ID is set: ${{ secrets.TDP_AWS_ACCESS_KEY_DEV != '' }}"
+          echo "AWS Secret Access Key is set: ${{ secrets.TDP_AWS_SECRET_ACCESS_KEY_DEV != '' }}"
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ env.ENVIRONMENT_NAME == 'prod' && secrets.TDP_AWS_ACCESS_KEY_PROD || secrets.TDP_AWS_ACCESS_KEY_DEV }}
+          aws-secret-access-key: ${{ env.ENVIRONMENT_NAME == 'prod' && secrets.TDP_AWS_SECRET_ACCESS_KEY_PROD || secrets.TDP_AWS_SECRET_ACCESS_KEY_DEV }}
+          aws-region: us-east-1
+
+      - name: Sync Entire Repo to S3
+        run: |
+          echo "Syncing repo to bucket: $SOURCE_BUCKET_NAME"
+          aws s3 sync . s3://$SOURCE_BUCKET_NAME/TDP/
+
+      - name: Verify S3 file
+        run: |
+          aws s3 ls s3://$SOURCE_BUCKET_NAME/TDP/step_functions/gold-tdp-all-sales-daily.json || echo "File not found in S3"
+      - name: Validate SAM template
+        run: |
+          sam validate --template-file templates/tdp-nested-template.yaml
+      - name: SAM Build
+        run: |
+          python --version
+          which python
+          sam build --template-file templates/tdp-nested-template.yaml --use-container --debug
+      - name: SAM Deploy
+        run: |
+          # Ensure ENVIRONMENT_NAME is set, default to 'dev' if not
+          ENVIRONMENT_NAME="${ENVIRONMENT_NAME:-dev}"
+
+          if [[ "${{ github.event.inputs.environment }}" == "prod" ]]; then
+            TAG="prod"
+          else
+            TAG="${{ github.event.inputs.tag }}"
+          fi
+          
+          # Build the parameter overrides string
+          PARAMS="SourceBucketName=$SOURCE_BUCKET_NAME"
+          PARAMS="$PARAMS Environment=$ENVIRONMENT_NAME"
+          PARAMS="$PARAMS GlueAssetsBucketName=$GLUE_ASSETS_BUCKET_NAME"
+          PARAMS="$PARAMS SaphanaGlueConnection=$SAP_HANA_GLUE_CONNECTION"
+          PARAMS="$PARAMS RedshiftNamespaceName=$REDSHIFT_NAMESPACE_NAME"
+          PARAMS="$PARAMS RedshiftDbName=$REDSHIFT_DB_NAME"
+          PARAMS="$PARAMS RedshiftWorkgroupName=$REDSHIFT_WORKGROUP_NAME"
+          PARAMS="$PARAMS RedshiftSecurityGroupId=$REDSHIFT_SECURITY_GROUP"
+          PARAMS="$PARAMS RedshiftSubnetIds=$REDSHIFT_SUBNET"
+          PARAMS="$PARAMS SchemaName=$SCHEMA_NAME-${{ github.event.inputs.tag }}"
+          PARAMS="$PARAMS Tag=$TAG"
+          PARAMS="$PARAMS ComprehensiveRole=$COMPREHENSIVE_ROLE_ARN"
+          PARAMS="$PARAMS BronzeBucket=$BRONZE_BUCKET"
+          PARAMS="$PARAMS SilverBucket=$SILVER_BUCKET"
+          PARAMS="$PARAMS GoldBucket=$GOLD_BUCKET"
+          PARAMS="$PARAMS RepslyBucket=$REPSLY_BUCKET"
+          PARAMS="$PARAMS RepslyDynamoTable=$REPSLY_DYNAMODB_TABLE"
+          PARAMS="$PARAMS TdpSfDb=$TDP_SF_DB"
+          PARAMS="$PARAMS SnowflakeLayer=$SNOWFLAKE_LAYER"
+          echo "GOOOOOLD $GOLD_BUCKET"
+          PARAMS="$PARAMS FinanceBucket=$FINANCE_BUCKET"
+          PARAMS="$PARAMS SapHanaLayer=$SAP_HANA_LAYER"
+          PARAMS="$PARAMS SnowflakeLayer=$SNOWFLAKE_LAYER"
+          # Debug: Print the parameters
+          echo "Parameter overrides: $PARAMS"
+          sam deploy \
+            --no-fail-on-empty-changeset \
+            --template-file .aws-sam/build/template.yaml \
+            --stack-name tdp-cfn-stack-$TAG \
+            --s3-bucket $SOURCE_BUCKET_NAME \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+            --tags Tag=$TAG Environment=$ENVIRONMENT_NAME \
+            --parameter-overrides "$PARAMS"
+      - name: Get AWS account ID
+        run: echo "AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_ENV
+
+      - name: Get AWS account ID
+        run: echo "AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_ENV
+
+      - name: Tag CloudFormation Resources
+        run: |
+          # STACK_NAME="tdp-cfn-stack-${{ github.event.inputs.tag }}-$ENVIRONMENT_NAME"
+          if [[ "${{ github.event.inputs.environment }}" == "prod" ]]; then
+            TAG="prod"
+            STACK_TAG="prod"
+          else
+            TAG="${{ github.event.inputs.tag }}"
+            STACK_TAG="${{ github.event.inputs.tag }}"
+          fi
+    
+          STACK_NAME="tdp-cfn-stack-$STACK_TAG"
+          echo "Checking for stack: $STACK_NAME"
+          # Check if the stack exists
+          if aws cloudformation describe-stacks --stack-name "$STACK_NAME" &>/dev/null; then
+            echo "Stack $STACK_NAME exists. Proceeding with resource tagging."
+            
+            resources=$(aws cloudformation describe-stack-resources --stack-name "$STACK_NAME" --query 'StackResources[].{LogicalResourceId:LogicalResourceId,PhysicalResourceId:PhysicalResourceId,ResourceType:ResourceType}' --output json)
+            
+            echo "$resources" | jq -c '.[]' | while read -r resource; do
+              logical_id=$(echo $resource | jq -r '.LogicalResourceId')
+              physical_id=$(echo $resource | jq -r '.PhysicalResourceId')
+              resource_type=$(echo $resource | jq -r '.ResourceType')
+              
+              case $resource_type in
+                "AWS::IAM::Role")
+                  arn=$(aws iam get-role --role-name "$physical_id" --query 'Role.Arn' --output text)
+                  ;;
+                "AWS::Glue::Job")
+                  arn="arn:aws:glue:${AWS_REGION}:${AWS_ACCOUNT_ID}:job/${physical_id}"
+                  ;;
+                *)
+                  if [[ $physical_id == arn:* ]]; then
+                    arn=$physical_id
+                  else
+                    echo "Skipping tagging for resource $logical_id ($physical_id) of type $resource_type"
+                    continue
+                  fi
+                  ;;
+              esac
+              
+              if [ ! -z "$arn" ]; then
+                echo "Tagging resource $logical_id ($arn)"
+                aws resourcegroupstaggingapi tag-resources --resource-arn-list "$arn" --tags "Tag=${{ github.event.inputs.tag }}"
+              fi
+            done
+          else
+            echo "Stack $STACK_NAME does not exist. Skipping resource tagging."
+          fi

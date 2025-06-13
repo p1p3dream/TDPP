@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  SourceBucketName:
+    Type: String
+    Description: Name of the bucket used to store the repo.
+  GlueAssetsBucketName:
+    Type: String
+    Description: Name of the bucket used to store glue runtime logs, temp files, etc
+  SaphanaGlueConnection:
+    Type: String
+    Description: Connection from glue to SAP HANA
+  GlueJobRoleArn:
+    Type: String
+    Description: ARN of the IAM Role for Glue Jobs
+  Tag:
+    Type: String
+    Description: Tag to append to resource names
+  StateMachineExecutionRoleArn:
+    Type: String
+    Description: ARN of the IAM Role for Step Function execution
+  Environment:
+    Type: String
+    Description: Deployment environment (dev/prod)
+    AllowedValues: 
+      - dev
+      - prod
+  BronzeBucket:
+    Type: String
+    Description: Bronze bucket
+  SilverBucket:
+    Type: String
+    Description: Silver bucket
+  GoldBucket:
+    Type: String
+    Description: Gold bucket
+
+Resources:
+  DevHanaS3GoldTdpAllSalesOpenperiodsGlueJob:
+    Type: 'AWS::Glue::Job'
+    Properties:
+      Name: !Sub 'dev-hana-s3-gold-tdp-all-sales-openperiods-${Tag}'
+      Role: !Ref GlueJobRoleArn
+      Command:
+        Name: 'glueetl'
+        ScriptLocation: !Sub 's3://${SourceBucketName}/TDP/jobs/tdp-all-sales/glue/dev-hana-s3-gold-tdp-all-sales-openperiods.py'
+        PythonVersion: '3'
+      DefaultArguments:
+        "--environment": !Ref Environment
+        "--bronze_bucket": !Ref BronzeBucket
+        "--silver_bucket": !Ref SilverBucket
+        "--gold_bucket": !Ref GoldBucket
+        "--enable-metrics": "true"
+        "--enable-spark-ui": "true"
+        "--spark-event-logs-path": !Sub "s3://${GlueAssetsBucketName}/sparkHistoryLogs-${Tag}/"
+        "--enable-job-insights": "false"
+        "--enable-observability-metrics": "true"
+        "--enable-glue-datacatalog": "true"
+        "--enable-continuous-cloudwatch-log": "true"
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+        "--TempDir": !Sub "s3://${GlueAssetsBucketName}/temporary-${Tag}/"
+      Connections:
+        Connections:
+          - !Ref SaphanaGlueConnection
+      MaxRetries: 0
+      Timeout: 2880
+      WorkerType: 'G.1X'
+      NumberOfWorkers: 10
+      GlueVersion: '4.0'
+      ExecutionClass: 'STANDARD'
+
+  DevS3RedshiftGoldTdpAllSalesOpenperiodsGlueJob:
+    Type: 'AWS::Glue::Job'
+    Properties:
+      Name: !Sub 'dev-s3-redshift-gold-tdp-all-sales-openperiods-${Tag}'
+      Role: !Ref GlueJobRoleArn
+      Command:
+        Name: 'glueetl'
+        ScriptLocation: !Sub 's3://${SourceBucketName}/TDP/jobs/tdp-all-sales/glue/dev-s3-redshift-gold-tdp-all-sales-openperiods.py'
+        PythonVersion: '3'
+      DefaultArguments:
+        "--environment": !Ref Environment
+        "--bronze_bucket": !Ref BronzeBucket
+        "--silver_bucket": !Ref SilverBucket
+        "--gold_bucket": !Ref GoldBucket
+        "--enable-metrics": "true"
+        "--enable-spark-ui": "true"
+        "--spark-event-logs-path": !Sub "s3://${GlueAssetsBucketName}/sparkHistoryLogs-${Tag}/"
+        "--enable-job-insights": "false"
+        "--enable-observability-metrics": "true"
+        "--enable-glue-datacatalog": "true"
+        "--enable-continuous-cloudwatch-log": "true"
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+        "--TempDir": !Sub "s3://${GlueAssetsBucketName}/temporary-${Tag}/"
+      Connections:
+        Connections:
+          - !Ref SaphanaGlueConnection
+      MaxRetries: 0
+      Timeout: 2880
+      WorkerType: 'G.1X'
+      NumberOfWorkers: 10
+      GlueVersion: '4.0'
+      ExecutionClass: 'STANDARD'
+
+############### STEP FUNCTIONS ###############
+  GoldTdpAllSalesDailyStepFunction:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub 'gold-tdp-all-sales-daily-${Tag}'
+      DefinitionUri: 
+        Bucket: !Ref SourceBucketName
+        Key: 'TDP/jobs/tdp-all-sales/step_functions/gold-tdp-all-sales-daily.json'
+      DefinitionSubstitutions:
+        DevHanaS3GoldTdpAllSalesOpenperiodsJob: !Ref DevHanaS3GoldTdpAllSalesOpenperiodsGlueJob
+        DevS3RedshiftGoldTdpAllSalesOpenperiodsJob: !Ref DevS3RedshiftGoldTdpAllSalesOpenperiodsGlueJob
+        Tag: !Ref Tag
+      Events:
+        ScheduledExecution:
+          Type: Schedule
+          Properties:
+            Description: "Schedule for running the gold-tdp-all-sales-daily Step Function"
+            Schedule: "cron(0 6 * * ? *)"
+            Enabled: false
+            Name: !Sub 'gold-tdp-all-sales-daily-${Tag}'
+      Role: !Ref StateMachineExecutionRoleArn
+      Type: STANDARD
+      Logging:
+        Level: "OFF"
+        IncludeExecutionData: false
+      Tracing:
+        Enabled: false
+      Tags:
+        StackName: !Ref AWS::StackName
+
+Outputs:
+  DevHanaS3GoldTdpAllSalesOpenperiodsJobName:
+    Description: "Name of the Dev HANA to S3 Gold TDP All Sales Openperiods Glue Job"
+    Value: !Ref DevHanaS3GoldTdpAllSalesOpenperiodsGlueJob
+
+  DevS3RedshiftGoldTdpAllSalesOpenperiodsJobName:
+    Description: "Name of the Dev S3 to Redshift Gold TDP All Sales Openperiods Glue Job"
+    Value: !Ref DevS3RedshiftGoldTdpAllSalesOpenperiodsGlueJob
+
+  GoldTdpAllSalesDailyStepFunctionArn:
+    Description: "ARN of the Gold TDP All Sales Daily Step Function"
+    Value: !Ref GoldTdpAllSalesDailyStepFunction

@@ -1,0 +1,171 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  SourceBucketName:
+    Type: String
+    Description: Name of the bucket used to store the repo.
+  GlueAssetsBucketName:
+    Type: String
+    Description: Name of the bucket used to store glue runtime logs, temp files, etc
+  SaphanaGlueConnection:
+    Type: String
+    Description: Connection from glue to SAP HANA
+  GlueJobRoleArn:
+    Type: String
+    Description: ARN of the IAM Role for Glue Jobs
+  LambdaRoleArn:
+    Type: String
+    Description: ARN of the IAM Role for the  Lambda Functions
+  Tag:
+    Type: String
+    Description: Tag to append to resource names
+  StateMachineExecutionRoleArn:
+    Type: String
+    Description: ARN of the IAM Role for Step Function execution
+  Environment:
+    Type: String
+    Description: Deployment environment (dev/prod)
+    AllowedValues: 
+      - dev
+      - prod
+  FinanceBucket:
+    Type: String
+    Description: Bucket for finance
+
+Resources:
+  ############### SNS TOPIC ###############
+  FinanceNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'tdp-finance-notifications-${Tag}'
+      Tags:
+        - Key: Name
+          Value: !Sub 'tdp-finance-notifications-${Tag}'
+        - Key: StackName
+          Value: !Ref AWS::StackName
+
+  ############### LAMBDA FUNCTIONS ###############
+  S3ToS3FinanceLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'tdp-lambda-s3-to-s3-finance-${Tag}'
+      Handler: tdp-lambda-s3-to-s3-finance.lambda_handler
+      CodeUri: ./lambda_functions/tdp-lambda-s3-to-s3-finance/
+      Runtime: python3.9
+      Role: !Ref LambdaRoleArn
+      Timeout: 180
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+          FINANCE_BUCKET: !Ref FinanceBucket
+
+  CalculateDateFinanceLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'tdp-lambda-calculate-date-finance-${Tag}'
+      Runtime: python3.9
+      Handler: tdp-lambda-calculate-date-finance.lambda_handler
+      CodeUri: ./lambda_functions/tdp-lambda-calculate-date-finance/
+      Role: !Ref LambdaRoleArn
+      Timeout: 180
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+          FINANCE_BUCKET: !Ref FinanceBucket
+
+  ############### GLUE JOBS ###############
+  HanaToS3FinanceGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub 'tdp-glue-hana-to-s3-finance-${Tag}'
+      Role: !Ref GlueJobRoleArn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub 's3://${SourceBucketName}/TDP/jobs/finance-automation/glue/tdp-glue-hana-to-s3-finance.py'
+        PythonVersion: '3'
+      DefaultArguments:
+        "--finance-bucket": !Ref FinanceBucket
+        "--start_date": "2025-01-01"
+        "--end_date": "2025-01-10"
+        "--report_name": "example-report"
+        "--state": "FL"
+        "--enable-metrics": "true"
+        "--enable-spark-ui": "true"
+        "--spark-event-logs-path": !Sub "s3://${GlueAssetsBucketName}/sparkHistoryLogs-${Tag}/"
+        "--enable-job-insights": "false"
+        "--enable-observability-metrics": "true"
+        "--enable-glue-datacatalog": "true"
+        "--enable-continuous-cloudwatch-log": "true"
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--job-language": "python"
+        "--TempDir": !Sub "s3://${GlueAssetsBucketName}/temporary-${Tag}/"
+      Connections:
+        Connections:
+          - !Ref SaphanaGlueConnection
+      MaxRetries: 0
+      Timeout: 2880
+      WorkerType: G.1X
+      NumberOfWorkers: 10
+      # MaxCapacity: 10
+      GlueVersion: '4.0'
+      ExecutionClass: STANDARD
+
+  ############### STEP FUNCTIONS ###############
+  SmTdpFinanceStepFunction:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub 'sm-tdp-finance-${Tag}'
+      DefinitionUri: 
+        Bucket: !Ref SourceBucketName
+        Key: 'TDP/jobs/finance-automation/step_functions/sm-tdp-finance.json'
+      DefinitionSubstitutions:
+        HanaToS3FinanceJob: !Ref HanaToS3FinanceGlueJob
+        S3ToS3FinanceLambda: !GetAtt S3ToS3FinanceLambda.Arn
+        CalculateDateFinanceLambda: !GetAtt CalculateDateFinanceLambda.Arn
+        FinanceTopicArn: !Ref FinanceNotificationTopic
+        Tag: !Ref Tag
+      Events:
+        ScheduledExecution:
+          Type: Schedule
+          Properties:
+            Description: "Schedule for running the sm-tdp-finance Step Function"
+            Schedule: "cron(0 5 1 * ? *)"
+            Enabled: false
+            Name: !Sub 'sm-tdp-finance-${Tag}'
+      Role: !Ref StateMachineExecutionRoleArn
+      Type: STANDARD
+      # Logging:
+      #   Level: OFF
+      #   IncludeExecutionData: false
+      # Tracing:
+      #   Enabled: false
+      Tags:
+        StackName: !Ref AWS::StackName
+
+Outputs:
+  S3ToS3FinanceLambda:
+    Description: "S3 to S3 Finance Lambda Function"
+    Value: !Ref S3ToS3FinanceLambda
+    
+  CalculateDateFinanceLambda:
+    Description: "Calculate Date Finance Lambda Function"
+    Value: !Ref CalculateDateFinanceLambda
+
+  HanaToS3FinanceGlueJob:
+    Description: "HANA to S3 Finance Glue Job"
+    Value: !Ref HanaToS3FinanceGlueJob
+
+  SmTdpFinanceStepFunction:
+    Description: "Finance Step Function ARN"
+    Value: !Ref SmTdpFinanceStepFunction
+
+  FinanceNotificationTopic:
+    Description: "Finance Notification Topic ARN"
+    Value: !Ref FinanceNotificationTopic

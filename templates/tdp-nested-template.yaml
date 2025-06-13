@@ -1,0 +1,342 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: AWS Glue Job to extract data from SAP HANA and write it to S3
+
+Parameters:
+  SourceBucketName:
+    Type: String
+    Description: Name of the bucket used to store the repo.
+  GlueAssetsBucketName:
+    Type: String
+    Description: Name of the bucket used to store glue runtime logs, temp files, etc
+  SaphanaGlueConnection:
+    Type: String
+    Description: Connection from glue to SAP HANA
+  Tag:
+    Type: String
+    Description: Tag to append to resource names
+  Environment:
+    Type: String
+    Description: Deployment environment (dev/prod)
+    AllowedValues: 
+      - dev
+      - prod
+    Default: dev
+  BronzeBucket:
+    Type: String
+    Description: Bronze bucket (tdp-bronze or tdp-bronze-prod)
+  SilverBucket:
+    Type: String
+    Description: Silver bucket (tdp-silver or tdp-silver-prod)
+  GoldBucket:
+    Type: String
+    Description: Gold bucket (tdp-gold or tdp-gold-prod)
+  FinanceBucket:
+    Type: String
+    Description: Bucket for finance reports
+  RepslyBucket:
+    Type: String
+    Description: S3 bucket for data lake storage
+  RepslyDynamoTable:
+    Type: String
+    Description: DynamoDB table name
+  TdpSfDb:
+    Type: String
+    Description: Snowflake DB/Schema
+  SapHanaLayer:
+    Type: String
+    Description:  SAP HANA lambda layer
+  SnowflakeLayer:
+    Type: String
+    Description:  SAP HANA lambda layer 
+
+
+Resources:
+  GlueJobRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub 'GlueRole-${AWS::StackName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'glue.amazonaws.com'
+                - 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+        - 'arn:aws:iam::aws:policy/AmazonS3FullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly'
+        - 'arn:aws:iam::aws:policy/SecretsManagerReadWrite'
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-GluePolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 's3:PutObject'
+                  - 's3:PutObjectAcl'
+                  - 's3:GetObject'
+                  - 's3:ListBucket'
+                  - 's3:*'
+                Resource: 
+                  - !Sub 'arn:aws:s3:::${GlueAssetsBucketName}*'
+                  - !Sub 'arn:aws:s3:::${SourceBucketName}*'
+              - Effect: 'Allow'
+                Action:
+                  - 'glue:*'
+                Resource: '*'
+              - Effect: 'Allow'
+                Action:
+                  - 'secretsmanager:*'
+                Resource: '*'
+
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub 'LambdaRole-${AWS::StackName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-LambdaRole'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 's3:*'
+                  - 'secretsmanager:*'
+                Resource: '*'
+
+              - Effect: Allow
+                Action:
+                  - dynamodb:"*"
+                Resource: "*"
+
+  StateMachineExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties: 
+      RoleName: !Sub 'StateMachineExecutionRole-${Tag}'
+      AssumeRolePolicyDocument: 
+        Version: '2012-10-17'
+        Statement: 
+          - Effect: 'Allow'
+            Principal:
+              Service: 
+                - 'states.amazonaws.com'
+                - 'lambda.amazonaws.com'
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AWSStepFunctionsFullAccess'
+        - 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-StepFunctionPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'glue:StartJobRun'
+                  - 'glue:GetJobRun'
+                  - 'glue:GetJobRuns'
+                  - 'glue:BatchStopJobRun'
+                Resource: '*'
+
+  ComprehensiveRole:
+    Type: 'AWS::IAM::Role'
+    Properties: 
+      RoleName: !Sub 'ComprehensiveRole-${Tag}'
+      AssumeRolePolicyDocument: 
+        Version: '2012-10-17'
+        Statement: 
+          - Effect: 'Allow'
+            Principal:
+              Service: 
+                - states.amazonaws.com
+                - glue.amazonaws.com
+                - lambda.amazonaws.com
+                - dynamodb.amazonaws.com
+                - scheduler.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AWSStepFunctionsFullAccess'
+        - 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+        - 'arn:aws:iam::aws:policy/AWSLambda_FullAccess'
+        - 'arn:aws:iam::aws:policy/AdministratorAccess'
+      Policies:
+        - PolicyName: !Sub '${AWS::StackName}-ComprehensiveRolePolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action: 
+                  - 'glue:*'
+                  - 's3:*'
+                  - 'rds:*'
+                  - 'ec2:*'
+                  - 'redshift:*'
+                  - 'lambda:*'
+                  - 'logs:*'
+                  - 'states:*'
+                  - 'events:*'
+                  - 'athena:*'
+                  - 'secretsmanager:*'
+                  - 'ses:*'
+                  - 'kinesis:*'
+                  - 'sqs:*'
+                  - 'firehose:*'
+                  - 'dynamodb:*'
+                  - 'cloudwatch:*'
+                  - 'databrew:*'
+                  - 'aws-marketplace:*'
+                Resource: '*'
+              - Effect: 'Allow'
+                Action: 'lambda:InvokeFunction'
+                Resource: !Sub 'arn:aws:lambda:*:${AWS::AccountId}:function/*'
+
+############# LAMBDA LAYERS #############
+  DatUtilitiesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "dat-utilities-layer-${Tag}"
+      Description: Layer containing dat_utilities package
+      ContentUri: ../dat_layer_build/
+      CompatibleRuntimes:
+        - python3.9
+      RetentionPolicy: Retain 
+
+############# CFN Stacks #############
+  # TdpAllSalesStack:
+  #   Type: AWS::Serverless::Application
+  #   Properties:
+  #     Location: '../jobs/tdp-all-sales/tdp-all-sales-template.yaml'
+  #     Parameters:
+  #       SourceBucketName: !Ref SourceBucketName
+  #       GlueAssetsBucketName: !Ref GlueAssetsBucketName
+  #       SaphanaGlueConnection: !Ref SaphanaGlueConnection
+  #       GlueJobRoleArn: !GetAtt GlueJobRole.Arn
+  #       Tag: !Ref Tag 
+  #       StateMachineExecutionRoleArn: !GetAtt StateMachineExecutionRole.Arn
+  #       Environment: !Ref Environment 
+  #       BronzeBucket: !Ref BronzeBucket
+  #       SilverBucket: !Ref SilverBucket
+  #       GoldBucket: !Ref GoldBucket
+
+  # GA4BqStack:
+  #   Type: AWS::Serverless::Application
+  #   Properties:
+  #     Location: '../jobs/ga4-bigquery/ga4-bq-template.yaml'
+  #     Parameters:
+  #       SourceBucketName: !Ref SourceBucketName
+  #       GlueAssetsBucketName: !Ref GlueAssetsBucketName
+  #       SaphanaGlueConnection: !Ref SaphanaGlueConnection
+  #       GlueJobRoleArn: !GetAtt GlueJobRole.Arn
+  #       Tag: !Ref Tag
+  #       Environment: !Ref Environment 
+
+  # SmTdpFinanceStack:
+  #   Type: AWS::Serverless::Application
+  #   Properties:
+  #     Location: '../jobs/finance-automation/sm-tdp-finance-template.yaml'
+  #     Parameters:
+  #       SourceBucketName: !Ref SourceBucketName
+  #       GlueAssetsBucketName: !Ref GlueAssetsBucketName
+  #       SaphanaGlueConnection: !Ref SaphanaGlueConnection
+  #       Tag: !Ref Tag
+  #       GlueJobRoleArn: !GetAtt ComprehensiveRole.Arn
+  #       LambdaRoleArn: !GetAtt LambdaRole.Arn
+  #       StateMachineExecutionRoleArn: !GetAtt ComprehensiveRole.Arn
+  #       Environment: !Ref Environment
+  #       FinanceBucket: !Ref FinanceBucket
+
+  # RepslyStack:
+  #   Type: AWS::Serverless::Application
+  #   DependsOn: ComprehensiveRole
+  #   Properties:
+  #     Location: '../jobs/repsly/repsly-template.yaml'
+  #     Parameters:
+  #       SaphanaGlueConnection: !Ref SaphanaGlueConnection
+  #       SourceBucketName: !Ref SourceBucketName
+  #       GlueAssetsBucketName: !Ref GlueAssetsBucketName
+  #       Tag: !Ref Tag
+  #       GlueJobRoleArn: !GetAtt ComprehensiveRole.Arn
+  #       ComprehensiveRoleArn: !GetAtt ComprehensiveRole.Arn
+  #       StateMachineExecutionRoleArn: !GetAtt ComprehensiveRole.Arn
+  #       Environment: !Ref Environment
+  #       RepslyDynamoTable: !Ref RepslyDynamoTable
+  #       RepslyBucket: !Ref RepslyBucket
+  #       BronzeBucket: !Ref BronzeBucket
+  #       SilverBucket: !Ref SilverBucket
+  #       TdpSfDb: !Ref TdpSfDb
+  #       SnowflakeLayer: !Ref SnowflakeLayer
+
+  # WFSStack:
+  #   Type: AWS::Serverless::Application
+  #   Properties:
+  #     Location: '../jobs/wfs/wfs-template.yaml'
+  #     Parameters:
+  #       StateMachineExecutionRoleArn: !GetAtt StateMachineExecutionRole.Arn
+  #       ComprehensiveRoleArn: !GetAtt ComprehensiveRole.Arn
+  #       SourceBucketName: !Ref SourceBucketName
+  #       GlueAssetsBucketName: !Ref GlueAssetsBucketName
+  #       SaphanaGlueConnection: !Ref SaphanaGlueConnection
+  #       GlueJobRoleArn: !GetAtt GlueJobRole.Arn
+  #       Tag: !Ref Tag
+  #       Environment: !Ref Environment
+  #       SapHanaLayer: !Ref SapHanaLayer
+
+  # WaitlyStack:
+  #   Type: AWS::Serverless::Application
+  #   Properties:
+  #     Location: '../jobs/waitly/tdp-waitly-template.yaml'
+  #     Parameters:
+  #       LambdaRoleArn: !GetAtt LambdaRole.Arn
+  #       BronzeBucket: !Ref BronzeBucket
+  #       Tag: !Ref Tag
+  #       Environment: !Ref Environment 
+
+Outputs:
+  GlueJobRoleARN:
+    Description: "ARN of the IAM Role created for the Glue Jobs"
+    Value: !GetAtt GlueJobRole.Arn
+
+  LambdaRoleARN:
+    Description: "ARN of the IAM Role created for the Lambda Functions"
+    Value: !GetAtt LambdaRole.Arn
+
+  ComprehensiveRoleARN:
+    Description: "ARN of the IAM Role created for many things"
+    Value: !GetAtt ComprehensiveRole.Arn
+
+  SourceBucketName:
+    Description: "Name of the Source S3 Bucket"
+    Value: !Ref SourceBucketName
+
+  GlueAssetsBucketName:
+    Description: "Name of the Glue Assets S3 Bucket"
+    Value: !Ref GlueAssetsBucketName
+
+  SaphanaGlueConnection:
+    Description: "Name of the SAP HANA Glue Connection"
+    Value: !Ref SaphanaGlueConnection
+
+  DatUtilitiesLayerArn:
+    Description: "ARN of the Lambda Layer for dat_utilities"
+    Value: !Ref DatUtilitiesLayer
+    # Export:
+    #   Name: DatUtilitiesLayerArn
+
+  # StateMachineExecutionRoleArn:
+  #   Description: "ARN of the StateMachineExecutionRole"
+  #   Value: !GetAtt StateMachineExecutionRole.Arn
+  #   Export:
+  #     Name: StateMachineExecutionRoleArn

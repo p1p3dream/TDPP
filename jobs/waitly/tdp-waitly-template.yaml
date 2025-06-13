@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  BronzeBucket:
+    Type: String
+    Description: Name of the bucket returns are landing in
+  LambdaRoleArn:
+    Type: String
+    Description: ARN of the IAM Role for the  Lambda Functions
+  Tag:
+    Type: String
+    Description: Tag to append to resource names
+  Environment:
+    Type: String
+    Description: Deployment environment (dev/prod)
+    AllowedValues: 
+      - dev
+      - prod
+
+
+
+############### LAMBDA FUNCTIONS ###############
+Resources:
+  WaitlyLiveLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'waitly-live-api-daily-${Tag}'
+      Handler: waitly-live-api-daily.lambda_handler
+      CodeUri: ./store-summary/lambda_functions/waitly-live-api-daily/
+      Runtime: python3.9
+      Role: !Ref LambdaRoleArn
+      Timeout: 180
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+
+  WaitlyLiveEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'waitlylive-${Tag}'
+      ScheduleExpression: "rate(1 day)"  # update if needed
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt WaitlyLiveLambda.Arn
+          Id: "WaitlyLiveLambdaTarget"

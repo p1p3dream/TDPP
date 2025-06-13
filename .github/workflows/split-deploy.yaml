@@ -1,0 +1,262 @@
+name: Split Deploy to AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to append to the stack name and objects'
+        required: true
+        default: 'cicdexec'
+      environment:
+        description: 'Deployment environment (dev or prod)'
+        required: true
+        default: 'dev'
+      job_prefix:
+        description: 'Optional job directory to deploy only that job'
+        required: false
+        default: 'sendgrid-webhook'
+      execute_ddl:
+        description: 'Execute snowflake DDL? (true or false)'
+        required: false
+        default: 'true'
+
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+      JOB_PREFIX: ${{ github.event.inputs.job_prefix }}
+      EXECUTE_DDL: ${{ github.event.inputs.execute_ddl }}
+      PYTHONPATH: $GITHUB_WORKSPACE
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Set up AWS SAM
+        uses: aws-actions/setup-sam@v2
+        with:
+          version: 1.90.0
+
+      - name: Install yq manually
+        run: |
+          YQ_VER=v4.45.1
+          wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/${YQ_VER}/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Set environment variables
+        run: |
+          if [[ "${{ github.event.inputs.environment }}" == "prod" ]]; then
+            echo "Deploying to production"
+            cat env/env.prod >> $GITHUB_ENV
+            echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.TDP_AWS_ACCESS_KEY_PROD }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.TDP_AWS_SECRET_ACCESS_KEY_PROD }}" >> $GITHUB_ENV
+          else
+            echo "Deploying to development"
+            cat env/env.dev >> $GITHUB_ENV
+            echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.TDP_AWS_ACCESS_KEY_DEV }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.TDP_AWS_SECRET_ACCESS_KEY_DEV }}" >> $GITHUB_ENV
+          fi
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+
+      - name: Debug Environment Variables
+        run: |
+          echo "Environment: ${{ env.ENVIRONMENT_NAME }}"
+          echo "AWS Access Key ID is set: ${{ env.AWS_ACCESS_KEY_ID != '' }}"
+          echo "AWS Secret Access Key is set: ${{ env.AWS_SECRET_ACCESS_KEY != '' }}"
+          echo "AWS Region is set: ${{ env.AWS_REGION }}"
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install boto3 snowflake-connector-python cryptography
+
+      - name: Prepare DAT Utilities Lambda layer
+        run: |
+          echo "Preparing dat_utilities layer..."
+          # Create the directory structure required for Python layers
+          mkdir -p dat_layer_build/python
+          
+          # Copy the dat_utilities package into this structure
+          cp -r dat_utilities dat_layer_build/python/
+          
+          # Make sure __init__.py exists at each level
+          touch dat_layer_build/python/__init__.py
+          touch dat_layer_build/python/dat_utilities/__init__.py
+          
+          # List the contents to verify
+          echo "Layer structure:"
+          find dat_layer_build -type f | sort
+
+      # Conditional DDL execution
+      - name: Execute DDL scripts
+        if: env.EXECUTE_DDL == 'true'
+        run: |
+          echo "→ execute_ddl flag is true; scanning for DDL scripts"
+          DDL_DIR="jobs/$JOB_PREFIX/ddl"
+          if [[ -d "$DDL_DIR" ]]; then
+            for sql in "$DDL_DIR"/*.sql; do
+              echo "→ Executing DDL: $sql"
+              export PYTHONPATH="${PWD}"
+              python3 -m dat_utilities.snowflake_executor --script "$sql" --environment "$ENVIRONMENT"
+            done
+          else
+            echo "No DDL directory found at $DDL_DIR"
+          fi
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ env.ENVIRONMENT_NAME == 'prod' && secrets.TDP_AWS_ACCESS_KEY_PROD || secrets.TDP_AWS_ACCESS_KEY_DEV }}
+          aws-secret-access-key: ${{ env.ENVIRONMENT_NAME == 'prod' && secrets.TDP_AWS_SECRET_ACCESS_KEY_PROD || secrets.TDP_AWS_SECRET_ACCESS_KEY_DEV }}
+          aws-region: us-east-1
+
+      - name: Sync Entire Repo to S3
+        run: |
+          echo "Syncing repo to bucket: $SOURCE_BUCKET_NAME"
+          aws s3 sync . s3://$SOURCE_BUCKET_NAME/TDP/
+
+      - name: Validate Core Template
+        run: sam validate --template-file templates/tdp-nested-template.yaml
+
+      - name: SAM Build Core
+        run: sam build --template-file templates/tdp-nested-template.yaml --use-container --debug
+
+      - name: Deploy Core Roles Stack
+        run: |
+          # Ensure tag and environment variables
+          TAG="${{ github.event.inputs.environment == 'prod' && 'prod2' || github.event.inputs.tag }}"
+
+          # Define all possible parameter overrides
+          ALL_OVERRIDES=(
+            "SourceBucketName=$SOURCE_BUCKET_NAME"
+            "GlueAssetsBucketName=$GLUE_ASSETS_BUCKET_NAME"
+            "SaphanaGlueConnection=$SAP_HANA_GLUE_CONNECTION"
+            "GlueJobRoleArn=$GLUE_JOB_ROLE_ARN"
+            "LambdaRoleArn=$LAMBDA_ROLE_ARN"
+            "StateMachineExecutionRoleArn=$COMPREHENSIVE_ROLE_ARN"
+            "Tag=$TAG"
+            "Environment=$ENVIRONMENT_NAME"
+            "BronzeBucket=$BRONZE_BUCKET"
+            "SilverBucket=$SILVER_BUCKET"
+            "GoldBucket=$GOLD_BUCKET"
+            "FinanceBucket=$FINANCE_BUCKET"
+            "RepslyBucket=$REPSLY_BUCKET"
+            "RepslyDynamoTable=$REPSLY_DYNAMODB_TABLE"
+            "TdpSfDb=$TDP_SF_DB"
+            "SapHanaLayer=$SAP_HANA_LAYER"
+            "SnowflakeLayer=$SNOWFLAKE_LAYER"
+            "RequestsLayer=$REQUESTS_LAYER"
+            "PagerdutyKey=$PAGERDUTY_KEY"
+          )
+
+          # Filter overrides to core template parameters
+          declared=$(yq eval '.Parameters | keys | .[]' templates/tdp-nested-template.yaml)
+          filtered=()
+          for kv in "${ALL_OVERRIDES[@]}"; do
+            key=${kv%%=*}
+            if printf '%s\n' "$declared" | grep -qx "$key"; then
+              filtered+=("$kv")
+            fi
+          done
+
+          echo "Filtered core overrides: ${filtered[*]}"
+
+          sam deploy \
+            --no-fail-on-empty-changeset \
+            --template-file .aws-sam/build/template.yaml \
+            --stack-name tdp-core-stack-$TAG \
+            --s3-bucket $SOURCE_BUCKET_NAME \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+            --tags Tag=$TAG Environment=$ENVIRONMENT_NAME \
+            --parameter-overrides "${filtered[@]}"
+
+          STACK_NAME=tdp-core-stack-$TAG
+          outputs=$(aws cloudformation describe-stacks \
+            --stack-name $STACK_NAME \
+            --query "Stacks[0].Outputs" \
+            --output json)
+          echo "COMPREHENSIVE_ROLE_ARN=$(echo $outputs | jq -r '.[] | select(.OutputKey=="ComprehensiveRoleARN").OutputValue')" >> $GITHUB_ENV
+          echo "LAMBDA_ROLE_ARN=$(echo $outputs | jq -r '.[] | select(.OutputKey=="LambdaRoleARN").OutputValue')" >> $GITHUB_ENV
+          echo "GLUE_JOB_ROLE_ARN=$(echo $outputs | jq -r '.[] | select(.OutputKey=="GlueJobRoleARN").OutputValue')" >> $GITHUB_ENV
+          echo "DAT_UTILITIES_LAYER_ARN=$(echo "$outputs" | jq -r '.[] | select(.OutputKey=="DatUtilitiesLayerArn").OutputValue')" >> $GITHUB_ENV
+          
+      - name: Deploy & Build Job Stacks
+        env:
+          JOB_PREFIX: ${{ github.event.inputs.job_prefix }}
+        run: |
+
+          # Ensure tag and environment variables
+            TAG="${{ github.event.inputs.environment == 'prod' && 'prod' || github.event.inputs.tag }}"
+
+          # choose pattern: single job or all
+          if [[ -n "$JOB_PREFIX" ]]; then
+            PATTERN=jobs/$JOB_PREFIX/*-template.yaml
+          else
+            PATTERN=jobs/*/*-template.yaml
+          fi
+
+          for tpl in $PATTERN; do
+            job=$(basename "$(dirname \"$tpl\")")
+            echo "→ Building $job"
+            sam build --template-file "$tpl" --use-container --debug --build-dir .aws-sam/build/$job
+
+            echo "→ Deploying $job"
+            # Define and filter overrides per-job within this run for scoping
+            ALL_OVERRIDES=(
+              "SourceBucketName=$SOURCE_BUCKET_NAME"
+              "GlueAssetsBucketName=$GLUE_ASSETS_BUCKET_NAME"
+              "SaphanaGlueConnection=$SAP_HANA_GLUE_CONNECTION"
+              "GlueJobRoleArn=$GLUE_JOB_ROLE_ARN"
+              "LambdaRoleArn=$LAMBDA_ROLE_ARN"
+              "StateMachineExecutionRoleArn=$COMPREHENSIVE_ROLE_ARN"
+              "ComprehensiveRoleArn=$COMPREHENSIVE_ROLE_ARN"
+              "Tag=$TAG"
+              "Environment=$ENVIRONMENT_NAME"
+              "BronzeBucket=$BRONZE_BUCKET"
+              "SilverBucket=$SILVER_BUCKET"
+              "GoldBucket=$GOLD_BUCKET"
+              "FinanceBucket=$FINANCE_BUCKET"
+              "RepslyBucket=$REPSLY_BUCKET"
+              "RepslyDynamoTable=$REPSLY_DYNAMODB_TABLE"
+              "TdpSfDb=$TDP_SF_DB"
+              "SapHanaLayer=$SAP_HANA_LAYER"
+              "SnowflakeLayer=$SNOWFLAKE_LAYER"
+              "RequestsLayer=$REQUESTS_LAYER"
+              "PagerdutyKey=$PAGERDUTY_KEY"
+              "DatUtilitiesLayer=${{ env.DAT_UTILITIES_LAYER_ARN }}"
+            )
+            # Filter against each job's built template
+            declared=$(yq eval '.Parameters | keys | .[]' .aws-sam/build/$job/template.yaml)
+            filtered=()
+            for kv in "${ALL_OVERRIDES[@]}"; do
+              key=${kv%%=*}
+              if printf '%s' "$declared" | grep -qx "$key"; then
+                filtered+=("$kv")
+              fi
+            done
+            echo "Filtered overrides for $job: ${filtered[*]}"
+
+            sam deploy \
+              --no-fail-on-empty-changeset \
+              --template-file .aws-sam/build/$job/template.yaml \
+              --stack-name "tdp-$job-$TAG" \
+              --s3-bucket $SOURCE_BUCKET_NAME \
+              --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
+              --parameter-overrides "${filtered[@]}"
+          done

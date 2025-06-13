@@ -1,0 +1,110 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  SourceBucketName:
+    Type: String
+    Description: Name of the bucket used to store the repo.
+  GlueAssetsBucketName:
+    Type: String
+    Description: Name of the bucket used to store glue runtime logs, temp files, etc
+  SaphanaGlueConnection:
+    Type: String
+    Description: Connection from glue to SAP HANA
+  GlueJobRoleArn:
+    Type: String
+    Description: ARN of the IAM Role for Glue Jobs
+  Tag:
+    Type: String
+    Description: Tag to append to resource names
+  GA4StartDate:
+    Type: String
+    Description: "Start date for GA4 data extraction"
+    Default: '2023-01-01'  # Set a default start date
+  GA4EndDate:
+    Type: String
+    Description: "End date for GA4 data extraction"
+    Default: '2023-12-31'
+  Environment:
+    Type: String
+    Description: Deployment environment (dev/prod)
+    AllowedValues: 
+      - dev
+      - prod  # Set a default end date
+
+Resources:
+#################### GLUE JOBS ####################
+  GA4BigQueryToBronzeGlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub "ga4-bq-bronze-${Tag}"
+      Description: " GA4 BigQuery to Bronze ETL job"
+      Role: !Ref GlueJobRoleArn
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://${GlueAssetsBucketName}/scripts/ga4-bq-bronze.py"
+        PythonVersion: "3"
+      DefaultArguments:
+        "--enable-metrics": "true"
+        "--enable-spark-ui": "true"
+        "--spark-event-logs-path": !Sub "s3://${GlueAssetsBucketName}/sparkHistoryLogs/"
+        "--enable-job-insights": "false"
+        "--enable-observability-metrics": "true"
+        "--enable-glue-datacatalog": "true"
+        "--enable-continuous-cloudwatch-log": "true"
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--datalake-formats": "hudi"
+        "--job-language": "python"
+        "--TempDir": !Sub "s3://${GlueAssetsBucketName}/temporary/"
+        "--enable-auto-scaling": "true"
+        # "--start_date": "{{start_date}}"
+        # "--end_date": "{{end_date}}"
+      MaxRetries: 0
+      Timeout: 2880
+      WorkerType: G.1X
+      NumberOfWorkers: 16
+      GlueVersion: "4.0"
+
+  GA4BronzeToSilver1GlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Sub "mwaa-ga4-events-bronze-silver1-${Tag}"
+      Description: " GA4 Events Bronze to Silver ETL job"
+      Role: !Ref GlueJobRoleArn
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://${GlueAssetsBucketName}/scripts/mwaa-ga4-events-bronze-silver1.py"
+        PythonVersion: "3"
+      DefaultArguments:
+        "--enable-metrics": "true"
+        "--enable-spark-ui": "true"
+        "--spark-event-logs-path": !Sub "s3://${GlueAssetsBucketName}/sparkHistoryLogs/"
+        "--enable-job-insights": "false"
+        "--enable-observability-metrics": "true"
+        "--enable-glue-datacatalog": "true"
+        "--enable-continuous-cloudwatch-log": "true"
+        "--job-bookmark-option": "job-bookmark-disable"
+        "--datalake-formats": "hudi"
+        "--job-language": "python"
+        "--TempDir": !Sub "s3://${GlueAssetsBucketName}/temporary/"
+        "--enable-auto-scaling": "true"
+        # "--start_date": "{{start_date}}"
+        # "--end_date": "{{end_date}}"
+      MaxRetries: 0
+      Timeout: 2880
+      WorkerType: G.1X
+      NumberOfWorkers: 16
+      GlueVersion: "4.0"
+
+Outputs:
+  GA4BigQueryToBronzeGlueJobName:
+    Description: "Name of the GA4 BigQuery to Bronze Glue Job"
+    Value: !Ref GA4BigQueryToBronzeGlueJob
+
+  GA4BronzeToSilver1GlueJobName:
+    Description: "Name of the GA4 Bronze to Silver Glue Job"
+    Value: !Ref GA4BronzeToSilver1GlueJob

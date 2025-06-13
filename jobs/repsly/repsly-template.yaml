@@ -1,0 +1,360 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  GlueAssetsBucketName:
+    Type: String
+    Description: Name of the bucket used to store glue runtime logs, temp files, etc
+  GlueJobRoleArn:
+    Type: String
+    Description: ARN of the IAM Role for Glue Jobs
+  ComprehensiveRoleArn:
+    Type: String
+    Description: ARN of the IAM Role for the Lambda Functions
+  Tag:
+    Type: String
+    Description: Tag to append to resource names
+  SaphanaGlueConnection:
+    Type: String
+    Description: Connection from glue to SAP HANA
+  StateMachineExecutionRoleArn:
+    Type: String
+    Description: ARN of the IAM Role for Step Function execution
+  Environment:
+    Type: String
+    Description: Deployment environment (dev/prod)
+    AllowedValues: 
+      - dev
+      - prod
+  SourceBucketName:
+    Type: String
+    Description: Name of the bucket used to store the repo
+  BronzeBucket:
+    Type: String
+    Description: Bronze bucket
+  SilverBucket:
+    Type: String
+    Description: Silver bucket
+  RepslyBucket:
+    Type: String
+    Description: S3 bucket for data lake storage
+  RepslyDynamoTable:
+    Type: String
+    Description: DynamoDB table name
+  TdpSfDb:
+    Type: String
+    Description: snowflake database
+  SnowflakeLayer:
+    Type: String
+    Description: Snowflake lambda layer
+
+Resources:
+  ############### LAMBDA FUNCTIONS ###############
+  IngestionRawRepslyLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-ingestion-raw-repsly-${Tag}'
+      Handler: lam-ingestion-raw-repsly.lambda_handler
+      CodeUri: ./lambda_functions/lam-ingestion-raw-repsly/
+      Runtime: python3.9
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 180
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Layers:
+        - !Ref SnowflakeLayer
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref RepslyBucket
+          REPSLY_DYNAMO_TABLE: !Ref RepslyDynamoTable
+
+  IngestionCuratedRepslyLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-ingestion-curated-repsly-${Tag}'
+      Handler: lam-ingestion-curated-repsly.lambda_handler
+      CodeUri: ./lambda_functions/lam-ingestion-curated-repsly/
+      Runtime: python3.9
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 180
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Layers:
+        - !Ref SnowflakeLayer
+      Environment:
+        Variables:
+          REPSLY_BUCKET: !Ref RepslyBucket
+          BRONZE_BUCKET: !Ref BronzeBucket
+          REPSLY_DYNAMO_TABLE: !Ref RepslyDynamoTable
+
+  ClientsToBronzeLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-tdp-repsly-clients-to-bronze-${Tag}'
+      Handler: lam-tdp-repsly-clients-to-bronze.lambda_handler
+      CodeUri: ./lambda_functions/lam-tdp-repsly-clients-to-bronze/
+      Runtime: python3.9
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 180
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Layers:
+        - !Ref SnowflakeLayer
+      Environment:
+        Variables:
+          REPSLY_BUCKET: !Ref RepslyBucket
+          BRONZE_BUCKET: !Ref BronzeBucket
+          TDP_SNOWFLAKE_DB: !Ref TdpSfDb
+
+  ClientsToSilverLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-tdp-repsly-clients-to-silver-${Tag}'
+      Handler: lam-tdp-repsly-clients-to-silver.lambda_handler
+      CodeUri: ./lambda_functions/lam-tdp-repsly-clients-to-silver/
+      Runtime: python3.9
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 180
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Layers:
+        - !Ref SnowflakeLayer
+      Environment:
+        Variables:
+          TDP_SNOWFLAKE_DB: !Ref TdpSfDb
+
+  VisitsToBronzeLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-tdp-repsly-visits-to-bronze-${Tag}'
+      Handler: lam-tdp-repsly-visits-to-bronze.lambda_handler
+      CodeUri: ./lambda_functions/lam-tdp-repsly-visits-to-bronze/
+      Runtime: python3.9
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 180
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Layers:
+        - !Ref SnowflakeLayer
+      Environment:
+        Variables:
+          TDP_SNOWFLAKE_DB: !Ref TdpSfDb
+
+  VisitsToSilverLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-tdp-repsly-visits-to-silver-${Tag}'
+      Handler: lam-tdp-repsly-visits-to-silver.lambda_handler
+      CodeUri: ./lambda_functions/lam-tdp-repsly-visits-to-silver/
+      Runtime: python3.9
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 180
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Layers:
+        - !Ref SnowflakeLayer
+      Environment:
+        Variables:
+          TDP_SNOWFLAKE_DB: !Ref TdpSfDb
+
+  FormsToBronzeLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-tdp-repsly-forms-to-bronze-${Tag}'
+      Handler: lam-tdp-repsly-forms-to-bronze.lambda_handler
+      CodeUri: ./lambda_functions/lam-tdp-repsly-forms-to-bronze/
+      Runtime: python3.9
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 180
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Layers:
+        - !Ref SnowflakeLayer
+      Environment:
+        Variables:
+          TDP_SNOWFLAKE_DB: !Ref TdpSfDb
+
+  FormsToSilverLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-tdp-repsly-forms-to-silver-${Tag}'
+      Handler: lam-tdp-repsly-forms-to-silver.lambda_handler
+      CodeUri: ./lambda_functions/lam-tdp-repsly-forms-to-silver/
+      Runtime: python3.9
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 180
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Layers:
+        - !Ref SnowflakeLayer
+      Environment:
+        Variables:
+          TDP_SNOWFLAKE_DB: !Ref TdpSfDb
+
+  ProductsToBronzeLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-tdp-repsly-products-to-bronze-${Tag}'
+      Handler: lam-tdp-repsly-products-to-bronze.lambda_handler
+      CodeUri: ./lambda_functions/lam-tdp-repsly-products-to-bronze/
+      Runtime: python3.9
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 180
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Layers:
+        - !Ref SnowflakeLayer
+      Environment:
+        Variables:
+          TDP_SNOWFLAKE_DB: !Ref TdpSfDb
+
+  ProductsToSilverLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-tdp-repsly-products-to-silver-${Tag}'
+      Handler: lam-tdp-repsly-products-to-silver.lambda_handler
+      CodeUri: ./lambda_functions/lam-tdp-repsly-products-to-silver/
+      Runtime: python3.9
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 180
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Layers:
+        - !Ref SnowflakeLayer
+      Environment:
+        Variables:
+          TDP_SNOWFLAKE_DB: !Ref TdpSfDb
+
+  RepresentativesToBronzeLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-tdp-repsly-representatives-to-bronze-${Tag}'
+      Handler: lam-tdp-repsly-representatives-to-bronze.lambda_handler
+      CodeUri: ./lambda_functions/lam-tdp-repsly-representatives-to-bronze/
+      Runtime: python3.9
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 180
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Layers:
+        - !Ref SnowflakeLayer
+      Environment:
+        Variables:
+          TDP_SNOWFLAKE_DB: !Ref TdpSfDb
+
+  RepresentativesToSilverLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'lam-tdp-repsly-representatives-to-silver-${Tag}'
+      Handler: lam-tdp-repsly-representatives-to-silver.lambda_handler
+      CodeUri: ./lambda_functions/lam-tdp-repsly-representatives-to-silver/
+      Runtime: python3.9
+      Role: !Ref ComprehensiveRoleArn
+      Timeout: 180
+      MemorySize: 128
+      Architectures:
+        - x86_64
+      Layers:
+        - !Ref SnowflakeLayer
+      Environment:
+        Variables:
+          TDP_SNOWFLAKE_DB: !Ref TdpSfDb
+
+  ############### STEP FUNCTIONS ###############
+  SmTdpRepslyStepFunction:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub 'sm-tdp-repsly-${Tag}'
+      DefinitionUri: 
+        Bucket: !Ref SourceBucketName
+        Key: 'TDP/jobs/repsly/step_functions/sm-tdp-repsly.json'
+      DefinitionSubstitutions:
+        IngestionRawRepslyLambda: !GetAtt IngestionRawRepslyLambda.Arn
+        IngestionCuratedRepslyLambda: !GetAtt IngestionCuratedRepslyLambda.Arn
+        ClientsToBronzeLambda: !GetAtt ClientsToBronzeLambda.Arn
+        ClientsToSilverLambda: !GetAtt ClientsToSilverLambda.Arn
+        VisitsToBronzeLambda: !GetAtt VisitsToBronzeLambda.Arn
+        VisitsToSilverLambda: !GetAtt VisitsToSilverLambda.Arn
+        FormsToBronzeLambda: !GetAtt FormsToBronzeLambda.Arn
+        FormsToSilverLambda: !GetAtt FormsToSilverLambda.Arn
+        ProductsToBronzeLambda: !GetAtt ProductsToBronzeLambda.Arn
+        ProductsToSilverLambda: !GetAtt ProductsToSilverLambda.Arn
+        RepresentativesToBronzeLambda: !GetAtt RepresentativesToBronzeLambda.Arn
+        RepresentativesToSilverLambda: !GetAtt RepresentativesToSilverLambda.Arn
+        Tag: !Ref Tag
+      Events:
+        ScheduledExecution:
+          Type: Schedule
+          Properties:
+            Description: "Schedule for running the sm-tdp-repsly Step Function"
+            Schedule: "cron(0 0 * * ? *)"
+            Enabled: false
+            Name: !Sub 'sm-tdp-repsly-${Tag}'
+      Role: !Ref StateMachineExecutionRoleArn
+      Type: STANDARD
+      Tags:
+        StackName: !Ref AWS::StackName
+
+Outputs:
+  SmTdpRepslyStepFunction:
+    Description: "Repsly Step Function ARN"
+    Value: !Ref SmTdpRepslyStepFunction
+  
+  IngestionRawRepslyLambda:
+    Description: "Raw Ingestion Lambda Function"
+    Value: !Ref IngestionRawRepslyLambda
+  
+  IngestionCuratedRepslyLambda:
+    Description: "Curated Ingestion Lambda Function"
+    Value: !Ref IngestionCuratedRepslyLambda
+
+  ClientsToBronzeLambda:
+    Description: "Clients Bronze Lambda Function"
+    Value: !Ref ClientsToBronzeLambda
+
+  ClientsToSilverLambda:
+    Description: "Clients Silver Lambda Function"
+    Value: !Ref ClientsToSilverLambda
+
+  VisitsToBronzeLambda:
+    Description: "Visits Bronze Lambda Function"
+    Value: !Ref VisitsToBronzeLambda
+
+  VisitsToSilverLambda:
+    Description: "Visits Silver Lambda Function"
+    Value: !Ref VisitsToSilverLambda
+
+  FormsToBronzeLambda:
+    Description: "Forms Bronze Lambda Function"
+    Value: !Ref FormsToBronzeLambda
+
+  FormsToSilverLambda:
+    Description: "Forms Silver Lambda Function"
+    Value: !Ref FormsToSilverLambda
+
+  ProductsToBronzeLambda:
+    Description: "Products Bronze Lambda Function"
+    Value: !Ref ProductsToBronzeLambda
+
+  ProductsToSilverLambda:
+    Description: "Products Silver Lambda Function"
+    Value: !Ref ProductsToSilverLambda
+
+  RepresentativesToBronzeLambda:
+    Description: "Representatives Bronze Lambda Function"
+    Value: !Ref RepresentativesToBronzeLambda
+
+  RepresentativesToSilverLambda:
+    Description: "Representatives Silver Lambda Function"
+    Value: !Ref RepresentativesToSilverLambda
