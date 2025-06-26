@@ -1,0 +1,91 @@
+name: Terragrunt Deploy to AWS
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to append to resource names'
+        required: true
+        default: 'cicdexec'
+      environment:
+        description: 'Deployment environment (dev or prod)'
+        required: true
+        default: 'dev'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+
+      - name: Install Terragrunt
+        run: |
+          TG_VERSION=v0.55.1
+          curl -L -o terragrunt https://github.com/gruntwork-io/terragrunt/releases/download/${TG_VERSION}/terragrunt_linux_amd64
+          chmod +x terragrunt
+          sudo mv terragrunt /usr/local/bin/terragrunt
+
+      - name: Set environment variables
+        run: |
+          if [[ "${{ github.event.inputs.environment }}" == "prod" ]]; then
+            ENV_FILE="env/env.prod"
+            echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.TDP_AWS_ACCESS_KEY_PROD }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.TDP_AWS_SECRET_ACCESS_KEY_PROD }}" >> $GITHUB_ENV
+          else
+            ENV_FILE="env/env.dev"
+            echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.TDP_AWS_ACCESS_KEY_DEV }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.TDP_AWS_SECRET_ACCESS_KEY_DEV }}" >> $GITHUB_ENV
+          fi
+
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+          cat "$ENV_FILE" >> $GITHUB_ENV
+
+          while IFS= read -r line || [ -n "$line" ]; do
+            [[ "$line" == "" || "$line" =~ ^# ]] && continue
+            key=${line%%=*}
+            value=${line#*=}
+            lower=$(echo "$key" | tr '[:upper:]' '[:lower:]')
+            echo "TF_VAR_${lower}=${value}" >> $GITHUB_ENV
+          done < "$ENV_FILE"
+
+          echo "TF_VAR_tag=${{ github.event.inputs.tag }}" >> $GITHUB_ENV
+          echo "TF_VAR_environment=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+
+      - name: Prepare DAT Utilities Lambda layer
+        run: |
+          mkdir -p dat_layer_build/python
+          cp -r dat_utilities dat_layer_build/python/
+          touch dat_layer_build/python/__init__.py
+          touch dat_layer_build/python/dat_utilities/__init__.py
+          cd dat_layer_build && zip -r ../dat_utilities.zip .
+          echo "TF_VAR_dat_utilities_zip=$(pwd)/../dat_utilities.zip" >> $GITHUB_ENV
+          cd ..
+
+      - name: Package Waitly Lambda function
+        run: |
+          mkdir -p waitly_build
+          cp jobs/waitly/store-summary/lambda_functions/waitly-live-api-daily/waitly-live-api-daily.py waitly_build/
+          cd waitly_build && zip -r ../waitly-live-api-daily.zip .
+          echo "TF_VAR_waitly_live_zip=$(pwd)/../waitly-live-api-daily.zip" >> $GITHUB_ENV
+          cd ..
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terragrunt Init
+        run: terragrunt init
+
+      - name: Terragrunt Apply
+        run: terragrunt apply -auto-approve
