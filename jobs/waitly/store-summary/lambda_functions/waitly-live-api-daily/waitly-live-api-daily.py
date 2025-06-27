@@ -13,6 +13,7 @@ s3 = boto3.client('s3')
 http = urllib3.PoolManager()
 
 BUCKET_NAME = "tdp-bronze"
+#THIS FILE IS NOW DIFFERENT
 
 def lambda_handler(event, context):
     try:
