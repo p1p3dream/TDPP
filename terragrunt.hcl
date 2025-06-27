@@ -2,6 +2,20 @@ terraform {
   source = "./terraform"
 }
 
+remote_state {
+  backend = "s3"
+  generate = {
+    path = "backend.tf"
+  }
+  config = {
+    bucket         = get_env("TF_STATE_BUCKET", "tdp-terraform-state")
+    key            = "terraform/${get_env("TF_VAR_environment", "dev")}/terraform.tfstate"
+    region         = get_env("AWS_REGION", "us-east-1")
+    encrypt        = true
+    dynamodb_table = "terraform-locks"
+  }
+}
+
 inputs = {
   aws_region             = "us-east-1"
   tag                    = get_env("TF_VAR_tag", "cicdexec")
